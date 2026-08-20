@@ -1,12 +1,9 @@
 import { Decimal } from "decimal.js";
 import type { AppConfig } from "../config/config.js";
 import type { TradeSignal } from "../models/signal.js";
+import { isPositiveDecimal as positive } from "../shared/decimal.js";
 
 export type ValidationResult = { valid: true } | { valid: false; code: string; reason: string };
-
-function positive(value: string | null): boolean {
-  try { return value !== null && new Decimal(value).gt(0) && new Decimal(value).isFinite(); } catch { return false; }
-}
 
 export class SignalValidator {
   constructor(private readonly config: AppConfig) {}

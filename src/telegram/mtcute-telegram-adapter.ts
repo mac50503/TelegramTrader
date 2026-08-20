@@ -33,4 +33,12 @@ export class MtcuteTelegramAdapter implements TelegramAdapter {
   }
 
   async stop(): Promise<void> { await this.client.destroy(); }
+
+  async listDialogs(): Promise<{ chatId: string; name: string }[]> {
+    const dialogs: { chatId: string; name: string }[] = [];
+    for await (const dialog of this.client.iterDialogs()) {
+      dialogs.push({ chatId: String(dialog.peer.id), name: dialog.peer.displayName });
+    }
+    return dialogs;
+  }
 }

@@ -38,3 +38,5 @@ export const contextSchema = z.object({
   currency: z.string().min(3).max(10), balance: decimal, equity: decimal, capturedAt: timestamp,
   symbols: z.array(symbolSpecSchema).min(1).max(100)
 }).strict();
+
+export const settingsUpdateSchema = z.record(z.string(), z.string());

@@ -1,4 +1,5 @@
-import { CliSignalAnalyzer, DisabledSignalAnalyzer } from "./agents/cli-signal-analyzer.js";
+import { createSignalAnalyzer } from "./agents/analyzer-factory.js";
+import { PrefilteredSignalAnalyzer } from "./agents/heuristic-prefilter.js";
 import { buildServer } from "./api/server.js";
 import { loadConfig } from "./config/config.js";
 import { openDatabase } from "./database/database.js";
@@ -11,11 +12,9 @@ const config = loadConfig();
 const logger = createLogger(config);
 const database = openDatabase(config.databaseUrl);
 const repositories = new SqliteRepositories(database);
-const analyzer = config.ai.enabled && config.ai.command
-  ? new CliSignalAnalyzer({ command: config.ai.command, args: config.ai.args, timeoutMs: config.ai.timeoutMs, maxOutputBytes: config.ai.maxOutputBytes })
-  : new DisabledSignalAnalyzer();
+const baseAnalyzer = await createSignalAnalyzer(config, logger);
+const analyzer = config.ai.prefilterEnabled ? new PrefilteredSignalAnalyzer(baseAnalyzer, logger) : baseAnalyzer;
 const pipeline = new SignalPipeline(config, repositories, repositories, repositories, analyzer, logger, repositories);
-const server = await buildServer(config, repositories, pipeline, logger);
 
 let telegram: MtcuteTelegramAdapter | undefined;
 if (config.telegram.enabled && config.telegram.apiId && config.telegram.apiHash) {
@@ -23,6 +22,8 @@ if (config.telegram.enabled && config.telegram.apiId && config.telegram.apiHash)
     sessionPath: config.telegram.sessionPath, allowedChats: config.telegram.allowedChats });
   await telegram.start((message) => pipeline.ingest(message).then(() => undefined));
 }
+
+const server = await buildServer(config, repositories, pipeline, logger, telegram);
 
 await server.listen({ host: config.api.host, port: config.api.port });
 logger.info({ event: "SERVER_STARTED", host: config.api.host, port: config.api.port, mode: config.tradingMode }, "Server started");

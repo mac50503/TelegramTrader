@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type Database from "better-sqlite3";
 import type { SignalAnalyzer } from "../src/application/ports.js";
@@ -65,5 +68,61 @@ describe("API REST e integración local", () => {
         assignmentToken: assignment.assignmentToken, executionId: "EXE-live-test", result: "FILLED", requestedPrice: "100",
         requestedVolume: "0.1", executedAt: new Date().toISOString() } });
     expect(response.statusCode).toBe(409);
+  });
+});
+
+describe("Página de configuración (/settings)", () => {
+  const config = testConfig();
+  const auth = { "x-api-key": config.api.key };
+  let db: Database.Database;
+  let repo: SqliteRepositories;
+  let app: Awaited<ReturnType<typeof buildServer>>;
+  let dir: string;
+  let envPath: string;
+
+  beforeEach(async () => {
+    db = openDatabase(":memory:"); repo = new SqliteRepositories(db);
+    const logger = createLogger(config);
+    const pipeline = new SignalPipeline(config, repo, repo, repo, { async analyze() { return { isSignal: false }; } }, logger, repo);
+    dir = mkdtempSync(join(tmpdir(), "tt-settings-"));
+    envPath = join(dir, ".env");
+    writeFileSync(envPath, "API_KEY=test-api-key-at-least-16\nAI_CLAUDE_MODEL=haiku\nTRADING_MODE=SIMULATION\n");
+    app = await buildServer(config, repo, pipeline, logger, undefined, envPath);
+  });
+  afterEach(async () => { await app.close(); db.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it("sirve la página sin exigir API key", async () => {
+    const response = await app.inject({ method: "GET", url: "/settings" });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/html");
+  });
+
+  it("exige API key para leer y escribir los datos de configuración", async () => {
+    expect((await app.inject({ method: "GET", url: "/api/settings" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/settings", payload: {} })).statusCode).toBe(401);
+  });
+
+  it("lee los valores actuales del .env", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/settings", headers: auth });
+    expect(response.json()).toMatchObject({ AI_CLAUDE_MODEL: "haiku", TRADING_MODE: "SIMULATION" });
+  });
+
+  it("guarda un cambio válido y lo refleja en /api/settings", async () => {
+    const post = await app.inject({ method: "POST", url: "/api/settings", headers: auth, payload: { AI_CLAUDE_MODEL: "opus" } });
+    expect(post.statusCode).toBe(200);
+    const get = await app.inject({ method: "GET", url: "/api/settings", headers: auth });
+    expect(get.json().AI_CLAUDE_MODEL).toBe("opus");
+  });
+
+  it("rechaza una combinación inválida (LIVE sin confirmación) con 400 y no modifica el archivo", async () => {
+    const response = await app.inject({ method: "POST", url: "/api/settings", headers: auth, payload: { TRADING_MODE: "LIVE" } });
+    expect(response.statusCode).toBe(400);
+    const get = await app.inject({ method: "GET", url: "/api/settings", headers: auth });
+    expect(get.json().TRADING_MODE).toBe("SIMULATION");
+  });
+
+  it("responde connected:false para los chats de Telegram cuando no hay adaptador", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/settings/telegram-chats", headers: auth });
+    expect(response.json()).toEqual({ connected: false, chats: [] });
   });
 });

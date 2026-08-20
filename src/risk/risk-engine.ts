@@ -2,14 +2,11 @@ import { Decimal } from "decimal.js";
 import type { AppConfig } from "../config/config.js";
 import type { TradeSignal } from "../models/signal.js";
 import type { Mt5Context, SymbolSpecification } from "../models/trade.js";
+import { floorToStep } from "../shared/decimal.js";
 
 export type RiskDecision =
   | { approved: true; volume: string; riskAmount: string; estimatedLoss: string; policy: "FIXED_LOT" | "RISK_PERCENTAGE" }
   | { approved: false; code: string; reason: string };
-
-function floorToStep(value: Decimal, step: Decimal): Decimal {
-  return value.div(step).floor().mul(step);
-}
 
 export class RiskEngine {
   constructor(private readonly config: AppConfig) {}

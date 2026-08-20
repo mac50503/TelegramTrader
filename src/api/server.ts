@@ -1,18 +1,16 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import rateLimit from "@fastify/rate-limit";
-import { timingSafeEqual } from "node:crypto";
 import type { Logger } from "pino";
 import type { AppConfig } from "../config/config.js";
+import { readEnvFile, writeEnvUpdates } from "../config/env-file.js";
 import type { SqliteRepositories } from "../repositories/sqlite-repositories.js";
 import type { SignalPipeline } from "../services/signal-pipeline.js";
+import type { MtcuteTelegramAdapter } from "../telegram/mtcute-telegram-adapter.js";
 import { AppError, NotFoundError } from "../shared/errors.js";
+import { secureEqual } from "../shared/security.js";
 import { logEvent } from "../logging/logger.js";
-import { assignedSchema, clientQuerySchema, closeSchema, contextSchema, executionSchema, signalListQuerySchema } from "./schemas.js";
-
-function secureEqual(actual: string, expected: string): boolean {
-  const a = Buffer.from(actual); const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+import { SETTINGS_PAGE_HTML } from "./settings-page.js";
+import { assignedSchema, clientQuerySchema, closeSchema, contextSchema, executionSchema, settingsUpdateSchema, signalListQuerySchema } from "./schemas.js";
 
 function header(request: FastifyRequest, name: string): string {
   const value = request.headers[name.toLowerCase()];
@@ -32,12 +30,17 @@ async function idempotent(
   return reply.code(200).send(body);
 }
 
-export async function buildServer(config: AppConfig, repositories: SqliteRepositories, pipeline: SignalPipeline, logger: Logger) {
+export async function buildServer(
+  config: AppConfig, repositories: SqliteRepositories, pipeline: SignalPipeline, logger: Logger,
+  telegram?: MtcuteTelegramAdapter, envPath = ".env"
+) {
   const app = Fastify({ loggerInstance: logger });
   await app.register(rateLimit, { max: config.api.rateLimitMax, timeWindow: config.api.rateLimitWindowMs });
 
   app.addHook("onRequest", async (request) => {
-    if (request.url === "/api/health") return;
+    // The settings page is static HTML/JS with no secrets of its own; every actual
+    // read/write of config still goes through /api/settings/* behind the same API key.
+    if (request.url === "/api/health" || request.url === "/settings") return;
     const apiKey = request.headers["x-api-key"];
     if (typeof apiKey !== "string" || !secureEqual(apiKey, config.api.key)) throw new AppError("UNAUTHORIZED", "Invalid API key", 401);
   });
@@ -50,6 +53,24 @@ export async function buildServer(config: AppConfig, repositories: SqliteReposit
   });
 
   app.get("/api/health", async () => ({ status: "ok", mode: config.tradingMode, database: "ready", timestamp: new Date().toISOString() }));
+
+  app.get("/settings", async (_request, reply) => reply.type("text/html").send(SETTINGS_PAGE_HTML));
+
+  app.get("/api/settings", async () => readEnvFile(envPath));
+
+  app.post("/api/settings", async (request) => {
+    const updates = settingsUpdateSchema.parse(request.body);
+    try {
+      return { saved: writeEnvUpdates(envPath, updates) };
+    } catch (error) {
+      throw new AppError("INVALID_SETTINGS", error instanceof Error ? error.message : "Invalid settings", 400);
+    }
+  });
+
+  app.get("/api/settings/telegram-chats", async () => {
+    if (!telegram) return { connected: false, chats: [] };
+    return { connected: true, chats: await telegram.listDialogs() };
+  });
 
   app.post("/api/mt5/context", async (request, reply) => idempotent(request, reply, repositories, "mt5-context", () => {
     const context = contextSchema.parse(request.body);
