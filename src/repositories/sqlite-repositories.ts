@@ -4,7 +4,7 @@ import type {
   AuditRepository, ContextRepository, IdempotencyRepository, RecordCloseInput, RecordExecutionInput,
   SignalRepository, TradeRepository
 } from "../application/ports.js";
-import type { SignalAnalysis, SignalStatus, TelegramMessage, TradeSignal } from "../models/signal.js";
+import type { SignalAnalysis, SignalStatus, TelegramMessage, TradeSignal, TradingMode } from "../models/signal.js";
 import type { Mt5Context, Trade, TradeAssignment } from "../models/trade.js";
 import { ConflictError, NotFoundError } from "../shared/errors.js";
 import { newAssignmentToken, newId } from "../shared/ids.js";
@@ -13,6 +13,10 @@ type Row = Record<string, unknown>;
 
 function now(): string { return new Date().toISOString(); }
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
+function nullableMt5Ticket(value: string | undefined): string | null {
+  const ticket = value?.trim();
+  return ticket && ticket !== "0" ? ticket : null;
+}
 
 function mapSignal(row: Row): TradeSignal {
   return {
@@ -21,7 +25,10 @@ function mapSignal(row: Row): TradeSignal {
     aiResultJson: row.ai_result_json === null ? null : String(row.ai_result_json),
     validationResultJson: row.validation_result_json === null ? null : String(row.validation_result_json),
     symbol: row.symbol === null ? null : String(row.symbol), side: row.side as TradeSignal["side"],
-    entry: row.entry === null ? null : String(row.entry), stopLoss: row.stop_loss === null ? null : String(row.stop_loss),
+    entry: row.entry === null ? null : String(row.entry),
+    entryMin: row.entry_min === null ? (row.entry === null ? null : String(row.entry)) : String(row.entry_min),
+    entryMax: row.entry_max === null ? (row.entry === null ? null : String(row.entry)) : String(row.entry_max),
+    stopLoss: row.stop_loss === null ? null : String(row.stop_loss),
     takeProfit: row.take_profit === null ? null : String(row.take_profit), requestedLot: row.requested_lot === null ? null : String(row.requested_lot),
     approvedLot: row.approved_lot === null ? null : String(row.approved_lot), riskPercentage: row.risk_percentage === null ? null : String(row.risk_percentage),
     confidence: row.confidence === null ? null : Number(row.confidence), receivedAt: String(row.received_at), expiresAt: String(row.expires_at),
@@ -88,9 +95,10 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
 
   saveAnalysis(id: string, analysis: SignalAnalysis): void {
     const detected = analysis.isSignal ? analysis : null;
-    const result = this.db.prepare(`UPDATE signals SET ai_result_json=?,symbol=?,side=?,entry=?,stop_loss=?,take_profit=?,requested_lot=?,
+    const result = this.db.prepare(`UPDATE signals SET ai_result_json=?,symbol=?,side=?,entry=?,entry_min=?,entry_max=?,stop_loss=?,take_profit=?,requested_lot=?,
       risk_percentage=?,confidence=?,analyzed_at=?,updated_at=?,version=version+1 WHERE id=?`).run(
-      json(analysis), detected?.symbol ?? null, detected?.side ?? null, detected?.entry ?? null, detected?.stopLoss ?? null,
+      json(analysis), detected?.symbol ?? null, detected?.side ?? null, detected?.entry ?? null,
+      detected?.entryMin ?? null, detected?.entryMax ?? null, detected?.stopLoss ?? null,
       detected?.takeProfit ?? null, detected?.lot ?? null, detected?.riskPercentage ?? null, detected?.confidence ?? null, now(), now(), id);
     if (result.changes !== 1) throw new NotFoundError("Signal");
   }
@@ -102,10 +110,11 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
   }
 
   hasSemanticDuplicate(signal: TradeSignal, since: string): boolean {
-    if (!signal.symbol || !signal.side || !signal.entry || !signal.stopLoss || !signal.takeProfit) return false;
-    return Boolean(this.db.prepare(`SELECT 1 FROM signals WHERE id<>? AND source=? AND symbol=? AND side=? AND entry=? AND stop_loss=?
+    if (!signal.symbol || !signal.side || !signal.entryMin || !signal.entryMax || !signal.stopLoss || !signal.takeProfit) return false;
+    return Boolean(this.db.prepare(`SELECT 1 FROM signals WHERE id<>? AND source=? AND symbol=? AND side=?
+      AND COALESCE(entry_min,entry)=? AND COALESCE(entry_max,entry)=? AND stop_loss=?
       AND take_profit=? AND received_at>=? AND status NOT IN ('IGNORED','REJECTED','ERROR') LIMIT 1`)
-      .get(signal.id, signal.source, signal.symbol, signal.side, signal.entry, signal.stopLoss, signal.takeProfit, since));
+      .get(signal.id, signal.source, signal.symbol, signal.side, signal.entryMin, signal.entryMax, signal.stopLoss, signal.takeProfit, since));
   }
 
   assignNext(clientId: string, mode: "SIMULATION" | "LIVE"): TradeAssignment | null {
@@ -115,7 +124,7 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       const row = this.db.prepare("SELECT * FROM signals WHERE status='QUEUED' AND expires_at>? ORDER BY received_at,id LIMIT 1").get(now()) as Row | undefined;
       if (!row) return null;
       const signal = mapSignal(row);
-      if (!signal.symbol || !signal.side || !signal.entry || !signal.stopLoss || !signal.takeProfit || !signal.approvedLot) return null;
+      if (!signal.symbol || !signal.side || !signal.entry || !signal.entryMin || !signal.entryMax || !signal.stopLoss || !signal.takeProfit || !signal.approvedLot) return null;
       const tradeId = newId("TRD");
       const token = newAssignmentToken();
       const timestamp = now();
@@ -123,7 +132,8 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
         VALUES(?,?,?,?,?,?,?,?,?)`).run(tradeId, signal.id, clientId, token, "ASSIGNED", mode, timestamp, timestamp, timestamp);
       this.setStatus(signal.id, "ASSIGNED");
       return { signalId: signal.id, tradeId, assignmentToken: token, mode, symbol: signal.symbol, side: signal.side,
-        entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit, volume: signal.approvedLot, expiresAt: signal.expiresAt };
+        entry: signal.entry, entryMin: signal.entryMin, entryMax: signal.entryMax, stopLoss: signal.stopLoss,
+        takeProfit: signal.takeProfit, volume: signal.approvedLot, expiresAt: signal.expiresAt };
     })();
   }
 
@@ -131,9 +141,12 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
     const row = this.db.prepare(`SELECT t.id trade_id,t.assignment_token,t.trading_mode,s.* FROM trades t JOIN signals s ON s.id=t.signal_id
       WHERE t.client_id=? AND t.status IN ('ASSIGNED','SUBMITTED','FILLED','UNKNOWN') ORDER BY t.assigned_at DESC LIMIT 1`).get(clientId) as Row | undefined;
     if (!row || !row.symbol || !row.side || !row.entry || !row.stop_loss || !row.take_profit || !row.approved_lot) return null;
+    const entryMin = row.entry_min ?? row.entry;
+    const entryMax = row.entry_max ?? row.entry;
     return { signalId: String(row.id), tradeId: String(row.trade_id), assignmentToken: String(row.assignment_token),
       mode: row.trading_mode as TradeAssignment["mode"], symbol: String(row.symbol), side: row.side as TradeAssignment["side"],
-      entry: String(row.entry), stopLoss: String(row.stop_loss), takeProfit: String(row.take_profit), volume: String(row.approved_lot),
+      entry: String(row.entry), entryMin: String(entryMin), entryMax: String(entryMax),
+      stopLoss: String(row.stop_loss), takeProfit: String(row.take_profit), volume: String(row.approved_lot),
       expiresAt: String(row.expires_at) };
   }
 
@@ -152,10 +165,13 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       if (trade.clientId !== input.clientId || trade.assignmentToken !== input.assignmentToken) throw new ConflictError("INVALID_ASSIGNMENT", "Invalid assignment token");
       if (trade.status === "CLOSED") throw new ConflictError("TRADE_ALREADY_CLOSED", "Trade is already closed");
       const timestamp = now();
+      const orderTicket = nullableMt5Ticket(input.orderTicket);
+      const dealTicket = nullableMt5Ticket(input.dealTicket);
+      const positionTicket = nullableMt5Ticket(input.positionTicket);
       this.db.prepare(`INSERT INTO executions(id,trade_id,request_id,result,mt5_order_ticket,mt5_deal_ticket,mt5_position_ticket,
         requested_price,execution_price,requested_volume,executed_volume,retcode,error_code,error_description,broker_response_json,executed_at,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.executionId, trade.id, input.requestId, input.result, input.orderTicket ?? null,
-        input.dealTicket ?? null, input.positionTicket ?? null, input.requestedPrice, input.executionPrice ?? null, input.requestedVolume,
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.executionId, trade.id, input.requestId, input.result, orderTicket,
+        dealTicket, positionTicket, input.requestedPrice, input.executionPrice ?? null, input.requestedVolume,
         input.executedVolume ?? null, input.retcode ?? null, input.errorCode ?? null, input.errorDescription ?? null,
         json(input.brokerResponse), input.executedAt, timestamp);
       const tradeStatus = input.result === "REJECTED" ? "REJECTED" : input.result === "UNKNOWN" ? "UNKNOWN" : "FILLED";
@@ -166,7 +182,7 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       if (tradeStatus === "FILLED") {
         const signal = this.findById(input.signalId)!;
         this.db.prepare(`INSERT INTO positions(id,trade_id,mt5_position_ticket,symbol,side,volume,open_price,stop_loss,take_profit,opened_at,status)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(newId("POS"), trade.id, input.positionTicket ?? null, signal.symbol, signal.side,
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(newId("POS"), trade.id, positionTicket, signal.symbol, signal.side,
           input.executedVolume ?? input.requestedVolume, input.executionPrice ?? input.requestedPrice, signal.stopLoss, signal.takeProfit, input.executedAt, "OPEN");
       }
       return this.requiredTrade(input.signalId);
@@ -194,12 +210,14 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
     return row ? mapTrade(row) : null;
   }
 
-  countDailyTrades(dayStart: string): number {
-    return Number((this.db.prepare("SELECT COUNT(*) count FROM trades WHERE assigned_at>=?").get(dayStart) as { count: number }).count);
+  countDailyTrades(dayStart: string, mode: TradingMode): number {
+    return Number((this.db.prepare("SELECT COUNT(*) count FROM trades WHERE assigned_at>=? AND trading_mode=?")
+      .get(dayStart, mode) as { count: number }).count);
   }
 
-  realizedDailyLoss(dayStart: string): string {
-    const rows = this.db.prepare("SELECT net_profit FROM positions WHERE status='CLOSED' AND closed_at>=?").all(dayStart) as { net_profit: string }[];
+  realizedDailyLoss(dayStart: string, mode: TradingMode): string {
+    const rows = this.db.prepare(`SELECT p.net_profit FROM positions p JOIN trades t ON t.id=p.trade_id
+      WHERE p.status='CLOSED' AND p.closed_at>=? AND t.trading_mode=?`).all(dayStart, mode) as { net_profit: string }[];
     const total = rows.reduce((sum, row) => Decimal.min(new Decimal(row.net_profit), 0).abs().plus(sum), new Decimal(0));
     return total.toString();
   }

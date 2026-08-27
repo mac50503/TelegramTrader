@@ -34,6 +34,11 @@ export function parseCodexOutput(raw: string): SignalAnalysis {
     }
   }
   try {
+    if (candidate && typeof candidate === "object" && "isSignal" in candidate) {
+      const output = candidate as Record<string, unknown>;
+      if (output.isSignal === false) return { isSignal: false };
+      candidate = Object.fromEntries(Object.entries(output).filter(([, value]) => value !== null));
+    }
     return signalAnalysisSchema.parse(candidate);
   } catch (error) {
     throw new AppError("AI_INVALID_JSON", "codex result did not match the expected signal schema", 422, error);
@@ -50,13 +55,14 @@ export class CodexCliSignalAnalyzer implements SignalAnalyzer {
     await writeFile(schemaFile, JSON.stringify(ANALYSIS_JSON_SCHEMA), "utf8");
     try {
       const args = [
+        // Global Codex options must precede the `exec` subcommand.
+        "--ask-for-approval", "never",
         "exec", "-",
         "--output-schema", schemaFile,
         "--output-last-message", outputFile,
         // Safe-by-default: no writes, no network/system changes, never pauses for approval.
         // This must never be relaxed for this pipeline — it classifies untrusted Telegram text.
         "--sandbox", this.options.sandbox,
-        "--ask-for-approval", "never",
         "--ephemeral",
         "--skip-git-repo-check"
       ];
@@ -74,7 +80,7 @@ export class CodexCliSignalAnalyzer implements SignalAnalyzer {
       }
       if (result.timedOut) throw new AppError("AI_TIMEOUT", "codex timed out", 503);
       if (result.outputExceeded) throw new AppError("AI_OUTPUT_TOO_LARGE", "codex output exceeded configured limit");
-      if (result.code !== 0) throw new AppError("AI_PROCESS_FAILED", `codex exited with code ${String(result.code)}: ${result.stderr.slice(0, 500)}`, 503);
+      if (result.code !== 0) throw new AppError("AI_PROCESS_FAILED", `codex exited with code ${String(result.code)}: ${result.stderr.slice(-2_000)}`, 503);
 
       let finalMessage: string;
       try {

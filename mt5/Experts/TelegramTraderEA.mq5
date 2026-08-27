@@ -1,5 +1,5 @@
 #property copyright "TelegramTrader"
-#property version   "1.000"
+#property version   "1.100"
 #property strict
 #property description "Cliente REST para TelegramTrader. Añada la URL en Tools > Options > Expert Advisors > WebRequest."
 
@@ -25,7 +25,11 @@ input string BrokerSymbol="";
 input int PollIntervalSeconds=5;
 input int HttpTimeoutMs=5000;
 input ulong ExpertMagicNumber=26081401;
-input bool EnableLiveTrading=false;
+input bool EnableLiveTrading=true;
+input bool RequireDemoAccountForLive=true;
+input int MaxEntryDeviationPoints=50;
+input int MaxEntryWaitSeconds=900;
+input int MaxSlippagePoints=20;
 
 CTelegramTraderHttp Http;
 CTrade Trade;
@@ -40,10 +44,14 @@ string ActiveMode="SIMULATION";
 string ActiveSymbol="";
 string ActiveSide="";
 double ActiveEntry=0;
+double ActiveEntryMin=0;
+double ActiveEntryMax=0;
 double ActiveStopLoss=0;
 double ActiveTakeProfit=0;
 double ActiveVolume=0;
 ulong ActivePositionTicket=0;
+ulong ActivePendingOrderTicket=0;
+datetime ActiveEntryWaitStarted=0;
 datetime LastContextSent=0;
 string PendingExecutionResult="";
 double PendingExecutionPrice=0;
@@ -108,19 +116,31 @@ bool ParseAssignment(const string response)
    ActiveSymbol=JsonString(response,"symbol");
    ActiveSide=JsonString(response,"side");
    ActiveEntry=StringToDouble(JsonString(response,"entry","0"));
+   ActiveEntryMin=StringToDouble(JsonString(response,"entryMin",DoubleToString(ActiveEntry,8)));
+   ActiveEntryMax=StringToDouble(JsonString(response,"entryMax",DoubleToString(ActiveEntry,8)));
+   if(ActiveEntryMin>ActiveEntryMax)
+     {
+      double swap=ActiveEntryMin;
+      ActiveEntryMin=ActiveEntryMax;
+      ActiveEntryMax=swap;
+     }
    ActiveStopLoss=StringToDouble(JsonString(response,"stopLoss","0"));
    ActiveTakeProfit=StringToDouble(JsonString(response,"takeProfit","0"));
    ActiveVolume=StringToDouble(JsonString(response,"volume","0"));
+   ActiveEntryWaitStarted=TimeCurrent();
    return ActiveSignalId!="" && AssignmentToken!="" && ActiveSymbol!="" && ActiveVolume>0;
   }
 
 bool BasicSignalCheck(void)
   {
    if(ActiveSide!="BUY" && ActiveSide!="SELL") return false;
-   if(ActiveEntry<=0 || ActiveStopLoss<=0 || ActiveTakeProfit<=0 || ActiveVolume<=0) return false;
-   if(ActiveSide=="BUY" && !(ActiveStopLoss<ActiveEntry && ActiveTakeProfit>ActiveEntry)) return false;
-   if(ActiveSide=="SELL" && !(ActiveStopLoss>ActiveEntry && ActiveTakeProfit<ActiveEntry)) return false;
+   if(ActiveEntry<=0 || ActiveEntryMin<=0 || ActiveEntryMax<=0 || ActiveStopLoss<=0 || ActiveTakeProfit<=0 || ActiveVolume<=0) return false;
+   if(ActiveEntryMin>ActiveEntryMax) return false;
+   if(ActiveSide=="BUY" && !(ActiveStopLoss<ActiveEntryMin && ActiveTakeProfit>ActiveEntryMax)) return false;
+   if(ActiveSide=="SELL" && !(ActiveStopLoss>ActiveEntryMax && ActiveTakeProfit<ActiveEntryMin)) return false;
    if(ActiveMode=="LIVE" && !EnableLiveTrading) return false;
+   if(ActiveMode=="LIVE" && RequireDemoAccountForLive &&
+      (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE)!=ACCOUNT_TRADE_MODE_DEMO) return false;
    return true;
   }
 
@@ -173,16 +193,182 @@ void TryReportPendingExecution(void)
    else State=POSITION_OPEN;
   }
 
+string ActiveOrderComment(void)
+  {
+   return "TT-"+ActiveSignalId;
+  }
+
+bool SelectActivePosition(double &open_price,ulong &deal_ticket)
+  {
+   string symbol=SelectedBrokerSymbol();
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=ExpertMagicNumber) continue;
+      string comment=PositionGetString(POSITION_COMMENT);
+      if(comment!=ActiveOrderComment()) continue;
+      ActivePositionTicket=ticket;
+      open_price=PositionGetDouble(POSITION_PRICE_OPEN);
+      deal_ticket=0;
+      ulong position_id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      if(HistorySelectByPosition(position_id))
+        {
+         for(int j=HistoryDealsTotal()-1;j>=0;j--)
+           {
+            ulong candidate=HistoryDealGetTicket(j);
+            ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(candidate,DEAL_ENTRY);
+            if(entry==DEAL_ENTRY_IN || entry==DEAL_ENTRY_INOUT)
+              {
+               deal_ticket=candidate;
+               break;
+              }
+           }
+        }
+      return true;
+     }
+   return false;
+  }
+
+bool RecoverPendingOrder(void)
+  {
+   string symbol=SelectedBrokerSymbol();
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=ExpertMagicNumber) continue;
+      if(OrderGetString(ORDER_COMMENT)!=ActiveOrderComment()) continue;
+      ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type!=ORDER_TYPE_BUY_LIMIT && type!=ORDER_TYPE_BUY_STOP &&
+         type!=ORDER_TYPE_SELL_LIMIT && type!=ORDER_TYPE_SELL_STOP) continue;
+      ActivePendingOrderTicket=ticket;
+      OrderAlreadySent=true;
+      ActiveEntry=OrderGetDouble(ORDER_PRICE_OPEN);
+      return true;
+     }
+   return false;
+  }
+
+void MonitorPendingOrder(void)
+  {
+   double fill_price=0;
+   ulong deal_ticket=0;
+   if(SelectActivePosition(fill_price,deal_ticket))
+     {
+      ulong order_ticket=ActivePendingOrderTicket;
+      ActivePendingOrderTicket=0;
+      SetPendingExecution("FILLED",fill_price,order_ticket,deal_ticket,ActivePositionTicket,
+                          "PENDING_FILLED","Pending order filled by broker");
+      TryReportPendingExecution();
+      return;
+     }
+   if(ActivePendingOrderTicket==0 || OrderSelect(ActivePendingOrderTicket)) return;
+   if(!HistoryOrderSelect(ActivePendingOrderTicket)) return;
+   ENUM_ORDER_STATE order_state=(ENUM_ORDER_STATE)HistoryOrderGetInteger(ActivePendingOrderTicket,ORDER_STATE);
+   if(order_state==ORDER_STATE_FILLED || order_state==ORDER_STATE_PARTIAL) return;
+   if(order_state!=ORDER_STATE_CANCELED && order_state!=ORDER_STATE_EXPIRED && order_state!=ORDER_STATE_REJECTED) return;
+   string code=order_state==ORDER_STATE_EXPIRED ? "ENTRY_TIMEOUT" : "PENDING_ORDER_REMOVED";
+   string description=order_state==ORDER_STATE_EXPIRED
+      ? "Pending entry order expired before it was filled"
+      : "Pending entry order was canceled or rejected by broker";
+   ulong order_ticket=ActivePendingOrderTicket;
+   ActivePendingOrderTicket=0;
+   SetPendingExecution("REJECTED",ActiveEntry,order_ticket,0,0,code,description);
+   TryReportPendingExecution();
+  }
+
+void PlacePendingEntry(const double market_price,const double entry_tolerance)
+  {
+   string symbol=SelectedBrokerSymbol();
+   int digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
+   double pending_price=0;
+   ENUM_ORDER_TYPE pending_type=ORDER_TYPE_BUY_LIMIT;
+   if(ActiveSide=="BUY")
+     {
+      if(market_price>ActiveEntryMax+entry_tolerance)
+        {
+         pending_type=ORDER_TYPE_BUY_LIMIT;
+         pending_price=ActiveEntryMax;
+        }
+      else
+        {
+         pending_type=ORDER_TYPE_BUY_STOP;
+         pending_price=ActiveEntryMin;
+        }
+     }
+   else
+     {
+      if(market_price<ActiveEntryMin-entry_tolerance)
+        {
+         pending_type=ORDER_TYPE_SELL_LIMIT;
+         pending_price=ActiveEntryMin;
+        }
+      else
+        {
+         pending_type=ORDER_TYPE_SELL_STOP;
+         pending_price=ActiveEntryMax;
+        }
+     }
+   pending_price=NormalizeDouble(pending_price,digits);
+   bool valid_levels=ActiveSide=="BUY"
+      ? ActiveStopLoss<pending_price && ActiveTakeProfit>pending_price
+      : ActiveStopLoss>pending_price && ActiveTakeProfit<pending_price;
+   if(!valid_levels)
+     {
+      OrderAlreadySent=true;
+      SetPendingExecution("REJECTED",pending_price,0,0,0,"INVALID_PENDING_LEVELS",
+                          "SL/TP are invalid for the pending entry price");
+      TryReportPendingExecution();
+      return;
+     }
+   datetime expiration=TimeCurrent()+MaxEntryWaitSeconds;
+   Trade.SetExpertMagicNumber(ExpertMagicNumber);
+   Trade.SetTypeFillingBySymbol(symbol);
+   Trade.SetDeviationInPoints(MaxSlippagePoints);
+   string comment=ActiveOrderComment();
+   OrderAlreadySent=true;
+   bool sent=false;
+   if(pending_type==ORDER_TYPE_BUY_LIMIT)
+      sent=Trade.BuyLimit(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+   else if(pending_type==ORDER_TYPE_BUY_STOP)
+      sent=Trade.BuyStop(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+   else if(pending_type==ORDER_TYPE_SELL_LIMIT)
+      sent=Trade.SellLimit(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+   else
+      sent=Trade.SellStop(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+   uint retcode=Trade.ResultRetcode();
+   ulong ticket=Trade.ResultOrder();
+   bool placed=sent && ticket>0 && (retcode==TRADE_RETCODE_PLACED || retcode==TRADE_RETCODE_DONE);
+   if(placed)
+     {
+      ActiveEntry=pending_price;
+      ActivePendingOrderTicket=ticket;
+      PrintFormat("Pending entry placed. signal=%s ticket=%I64u type=%d price=%.*f expiration=%s",
+                  ActiveSignalId,ticket,(int)pending_type,digits,pending_price,TimeToString(expiration,TIME_DATE|TIME_SECONDS));
+      return;
+     }
+   SetPendingExecution("REJECTED",pending_price,ticket,Trade.ResultDeal(),0,IntegerToString(retcode),Trade.ResultRetcodeDescription());
+   TryReportPendingExecution();
+  }
+
 void ExecuteActiveSignal(void)
   {
-   if(OrderAlreadySent) { TryReportPendingExecution(); return; }
+   if(OrderAlreadySent)
+     {
+      if(ActivePendingOrderTicket>0) MonitorPendingOrder();
+      else TryReportPendingExecution();
+      return;
+     }
    string symbol=SelectedBrokerSymbol();
    MqlTick tick;
    if(!SymbolInfoTick(symbol,tick)) { State=ERROR_STATE; return; }
    double price=ActiveSide=="BUY" ? tick.ask : tick.bid;
-   OrderAlreadySent=true;
    if(ActiveMode=="SIMULATION")
      {
+      OrderAlreadySent=true;
       SimulatedPosition=true;
       ActiveEntry=price;
       SetPendingExecution("SIMULATED_EXECUTION",price,0,0,0,"SIMULATION","SIMULATED_EXECUTION");
@@ -190,9 +376,35 @@ void ExecuteActiveSignal(void)
       return;
      }
    if(!EnableLiveTrading) { State=ERROR_STATE; return; }
+   double point=SymbolInfoDouble(symbol,SYMBOL_POINT);
+   if(point<=0 || MaxEntryDeviationPoints<0 || MaxEntryWaitSeconds<1 || MaxSlippagePoints<0)
+     {
+      OrderAlreadySent=true;
+      SetPendingExecution("REJECTED",price,0,0,0,"INVALID_EA_LIMITS","Invalid live entry protection settings");
+      TryReportPendingExecution();
+      return;
+     }
+   double entryTolerance=MaxEntryDeviationPoints*point;
+   if(price<ActiveEntryMin-entryTolerance || price>ActiveEntryMax+entryTolerance)
+     {
+      PlacePendingEntry(price,entryTolerance);
+      return;
+     }
+   bool validAtMarket=ActiveSide=="BUY"
+      ? ActiveStopLoss<price && ActiveTakeProfit>price
+      : ActiveStopLoss>price && ActiveTakeProfit<price;
+   if(!validAtMarket)
+     {
+      OrderAlreadySent=true;
+      SetPendingExecution("REJECTED",price,0,0,0,"INVALID_MARKET_LEVELS","SL/TP are invalid at the current market price");
+      TryReportPendingExecution();
+      return;
+     }
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
    Trade.SetTypeFillingBySymbol(symbol);
-   string comment="TT-"+ActiveSignalId;
+   Trade.SetDeviationInPoints(MaxSlippagePoints);
+   string comment=ActiveOrderComment();
+   OrderAlreadySent=true;
    bool sent=ActiveSide=="BUY"
       ? Trade.Buy(ActiveVolume,symbol,0,ActiveStopLoss,ActiveTakeProfit,comment)
       : Trade.Sell(ActiveVolume,symbol,0,ActiveStopLoss,ActiveTakeProfit,comment);
@@ -267,8 +479,10 @@ void MonitorPosition(void)
 void ResetActive(void)
   {
    SimulatedPosition=false; OrderAlreadySent=false; ActiveSignalId=""; ActiveTradeId=""; AssignmentToken="";
-   ActiveMode="SIMULATION"; ActiveSymbol=""; ActiveSide=""; ActiveEntry=0; ActiveStopLoss=0; ActiveTakeProfit=0;
-   ActiveVolume=0; ActivePositionTicket=0;
+   ActiveMode="SIMULATION"; ActiveSymbol=""; ActiveSide=""; ActiveEntry=0; ActiveEntryMin=0; ActiveEntryMax=0;
+   ActiveStopLoss=0; ActiveTakeProfit=0;
+   ActiveVolume=0; ActivePositionTicket=0; ActivePendingOrderTicket=0;
+   ActiveEntryWaitStarted=0;
    PendingExecutionResult=""; PendingExecutionPrice=0; PendingOrderTicket=0; PendingDealTicket=0; PendingPositionTicket=0;
    PendingRetcode=""; PendingDescription="";
   }
@@ -280,13 +494,32 @@ void RecoverCurrentTrade(void)
    if(status<200 || status>=300 || !JsonBool(response,"hasTrade",false)) { State=IDLE; return; }
    if(!ParseAssignment(response) || !BasicSignalCheck()) { State=ERROR_STATE; return; }
    string tradeStatus=JsonString(response,"status","");
-   if(tradeStatus=="ASSIGNED") { State=EXECUTING; return; }
+   if(tradeStatus=="ASSIGNED")
+     {
+      if(RecoverPendingOrder()) { State=EXECUTING; return; }
+      double fill_price=0;
+      ulong deal_ticket=0;
+      if(SelectActivePosition(fill_price,deal_ticket))
+        {
+         OrderAlreadySent=true;
+         SetPendingExecution("FILLED",fill_price,0,deal_ticket,ActivePositionTicket,
+                             "RECOVERED_FILL","Recovered a filled pending order");
+        }
+      State=EXECUTING;
+      return;
+     }
    if(tradeStatus=="FILLED")
      {
       OrderAlreadySent=true;
       if(ActiveMode=="SIMULATION") SimulatedPosition=true;
-      else if(PositionSelect(SelectedBrokerSymbol())) ActivePositionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
-      else { State=ERROR_STATE; return; }
+      else
+        {
+         double fill_price=0;
+         ulong deal_ticket=0;
+         if(!SelectActivePosition(fill_price,deal_ticket) && PositionSelect(SelectedBrokerSymbol()))
+            ActivePositionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
+        }
+      if(ActiveMode=="LIVE" && ActivePositionTicket==0) { State=ERROR_STATE; return; }
       State=POSITION_OPEN;
       return;
      }
@@ -309,8 +542,12 @@ void CheckNext(void)
 int OnInit(void)
   {
    if(ApiKey=="" || ClientId=="" || PollIntervalSeconds<1) return INIT_PARAMETERS_INCORRECT;
+   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d accountMode=%d",
+               EnableLiveTrading ? "true" : "false",RequireDemoAccountForLive ? "true" : "false",
+               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,(int)AccountInfoInteger(ACCOUNT_TRADE_MODE));
    Http.Configure(ApiUrl,ApiKey,HttpTimeoutMs);
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
+   Trade.SetDeviationInPoints(MaxSlippagePoints);
    EventSetTimer(PollIntervalSeconds);
    PostContext();
    RecoverCurrentTrade();

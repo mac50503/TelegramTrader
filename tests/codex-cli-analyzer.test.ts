@@ -12,6 +12,24 @@ describe("parseCodexOutput", () => {
     expect(parseCodexOutput("\n  {\"isSignal\":false}  \n")).toEqual({ isSignal: false });
   });
 
+  it("normaliza la salida nullable de Structured Outputs cuando no es señal", () => {
+    const raw = JSON.stringify({
+      isSignal: false, symbol: null, side: null, entry: null, stopLoss: null,
+      takeProfit: null, lot: null, riskPercentage: null, confidence: null
+    });
+    expect(parseCodexOutput(raw)).toEqual({ isSignal: false });
+  });
+
+  it("elimina opcionales null de una señal estructurada", () => {
+    const raw = JSON.stringify({
+      isSignal: true, symbol: "XAUUSD", side: "SELL", entry: 4646, stopLoss: 4651,
+      takeProfit: 4640, lot: null, riskPercentage: null, confidence: 0.95
+    });
+    expect(parseCodexOutput(raw)).toMatchObject({
+      isSignal: true, symbol: "XAUUSD", side: "SELL", entry: "4646", confidence: 0.95
+    });
+  });
+
   it("recurre a extraer el objeto si hay texto adicional (fallback)", () => {
     const raw = "Here is the result:\n{\"isSignal\":false}\nHope that helps!";
     expect(parseCodexOutput(raw)).toEqual({ isSignal: false });

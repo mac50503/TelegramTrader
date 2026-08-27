@@ -87,10 +87,10 @@ export class SignalPipeline {
     const spec = context.symbols.find((item) => item.canonicalSymbol.toUpperCase() === signal.symbol?.toUpperCase());
     if (!spec) { this.reject(signal, "UNSUPPORTED_SYMBOL", "No broker symbol mapping/specification is available"); return; }
     const startOfUtcDay = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
-    if (this.trades.countDailyTrades(startOfUtcDay) >= this.config.risk.maxDailyTrades) {
+    if (this.trades.countDailyTrades(startOfUtcDay, this.config.tradingMode) >= this.config.risk.maxDailyTrades) {
       this.reject(signal, "MAX_DAILY_TRADES", "Daily trade limit reached"); return;
     }
-    if (new Decimal(this.trades.realizedDailyLoss(startOfUtcDay)).gte(this.config.risk.maxDailyLoss)) {
+    if (new Decimal(this.trades.realizedDailyLoss(startOfUtcDay, this.config.tradingMode)).gte(this.config.risk.maxDailyLoss)) {
       this.reject(signal, "MAX_DAILY_LOSS", "Daily loss limit reached"); return;
     }
     const decision = this.riskEngine.evaluate(signal, context, spec);

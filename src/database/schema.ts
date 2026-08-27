@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS signals (
   symbol TEXT,
   side TEXT CHECK(side IN ('BUY', 'SELL') OR side IS NULL),
   entry TEXT,
+  entry_min TEXT,
+  entry_max TEXT,
   stop_loss TEXT,
   take_profit TEXT,
   requested_lot TEXT,

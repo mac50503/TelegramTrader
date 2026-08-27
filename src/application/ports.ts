@@ -1,4 +1,4 @@
-import type { TelegramMessage, SignalAnalysis, TradeSignal, SignalStatus } from "../models/signal.js";
+import type { TelegramMessage, SignalAnalysis, TradeSignal, SignalStatus, TradingMode } from "../models/signal.js";
 import type { Mt5Context, Trade, TradeAssignment } from "../models/trade.js";
 
 export interface TelegramAdapter {
@@ -27,8 +27,8 @@ export interface TradeRepository {
   recordExecution(input: RecordExecutionInput): Trade;
   recordClose(input: RecordCloseInput): Trade;
   findTradeBySignalId(signalId: string): Trade | null;
-  countDailyTrades(dayStart: string): number;
-  realizedDailyLoss(dayStart: string): string;
+  countDailyTrades(dayStart: string, mode: TradingMode): number;
+  realizedDailyLoss(dayStart: string, mode: TradingMode): string;
   countActiveTrades(): number;
 }
 

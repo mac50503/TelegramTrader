@@ -18,7 +18,8 @@ describe("API REST e integración local", () => {
   let repo: SqliteRepositories;
   let app: Awaited<ReturnType<typeof buildServer>>;
   let pipeline: SignalPipeline;
-  const analyzer: SignalAnalyzer = { async analyze() { return { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "100", stopLoss: "99", takeProfit: "102", lot: "0.1", confidence: 0.99 }; } };
+  const analyzer: SignalAnalyzer = { async analyze() { return { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "100",
+    entryMin: "100", entryMax: "101", stopLoss: "99", takeProfit: "102", lot: "0.1", confidence: 0.99 }; } };
 
   beforeEach(async () => {
     db = openDatabase(":memory:"); repo = new SqliteRepositories(db);
@@ -42,13 +43,14 @@ describe("API REST e integración local", () => {
     const next = await app.inject({ method: "GET", url: "/api/trades/next?clientId=test-ea", headers: auth });
     const assignment = next.json().signal;
     expect(next.json().hasSignal).toBe(true);
+    expect(assignment).toMatchObject({ entry: "100", entryMin: "100", entryMax: "101" });
     expect((await app.inject({ method: "GET", url: "/api/trades/next?clientId=test-ea", headers: auth })).json().hasSignal).toBe(false);
     const mutableHeaders = { ...auth, "x-request-id": "req-1", "idempotency-key": "assigned-1" };
     expect((await app.inject({ method: "POST", url: `/api/trades/${assignment.signalId}/assigned`, headers: mutableHeaders,
       payload: { clientId: "test-ea", assignmentToken: assignment.assignmentToken } })).statusCode).toBe(200);
     const executionPayload = { clientId: "test-ea", assignmentToken: assignment.assignmentToken, executionId: "EXE-test-1",
       result: "SIMULATED_EXECUTION", requestedPrice: "100", executionPrice: "100.1", requestedVolume: "0.1", executedVolume: "0.1",
-      executedAt: new Date().toISOString() };
+      orderTicket: "0", dealTicket: "0", positionTicket: "0", executedAt: new Date().toISOString() };
     const executionHeaders = { ...auth, "x-request-id": "execution-1", "idempotency-key": "execution-1" };
     expect((await app.inject({ method: "POST", url: `/api/trades/${assignment.signalId}/execution`, headers: executionHeaders, payload: executionPayload })).statusCode).toBe(200);
     expect((await app.inject({ method: "POST", url: `/api/trades/${assignment.signalId}/execution`, headers: executionHeaders, payload: executionPayload })).statusCode).toBe(200);
@@ -57,6 +59,24 @@ describe("API REST e integración local", () => {
       payload: { clientId: "test-ea", assignmentToken: assignment.assignmentToken, closePrice: "102", grossProfit: "20",
         commission: "0", swap: "0", netProfit: "20", closeReason: "SIMULATED_TP", closedAt: new Date().toISOString() } })).statusCode).toBe(200);
     expect(repo.findById(assignment.signalId)?.status).toBe("CLOSED");
+
+    const second = repo.createFromTelegram({ chatId: "-100", messageId: "2", timestamp: new Date().toISOString(),
+      text: "BUY XAUUSD 101", chatName: "Signals", source: "TELEGRAM" }, new Date(Date.now() + 60_000).toISOString())!;
+    repo.saveAnalysis(second.id, { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "101", entryMin: "101", entryMax: "101", stopLoss: "100",
+      takeProfit: "103", lot: "0.1", confidence: 0.99 });
+    repo.setStatus(second.id, "ANALYZING");
+    repo.saveValidated(second.id, "0.1", "{}");
+    repo.setStatus(second.id, "VALIDATED");
+    repo.setStatus(second.id, "QUEUED");
+    const secondAssignment = (await app.inject({ method: "GET", url: "/api/trades/next?clientId=test-ea", headers: auth })).json().signal;
+    const secondExecution = await app.inject({ method: "POST", url: `/api/trades/${second.id}/execution`,
+      headers: { ...auth, "x-request-id": "execution-2", "idempotency-key": "execution-2" },
+      payload: { ...executionPayload, assignmentToken: secondAssignment.assignmentToken, executionId: "EXE-test-2" } });
+    expect(secondExecution.statusCode).toBe(200);
+    const tickets = db.prepare("SELECT mt5_order_ticket,mt5_deal_ticket,mt5_position_ticket FROM executions ORDER BY created_at").all() as
+      Array<{ mt5_order_ticket: string | null; mt5_deal_ticket: string | null; mt5_position_ticket: string | null }>;
+    expect(tickets).toHaveLength(2);
+    expect(tickets.every((row) => row.mt5_order_ticket === null && row.mt5_deal_ticket === null && row.mt5_position_ticket === null)).toBe(true);
   });
 
   it("impide reportar un fill real en simulación", async () => {

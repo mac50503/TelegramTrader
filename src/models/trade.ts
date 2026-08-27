@@ -24,6 +24,8 @@ export interface TradeAssignment {
   symbol: string;
   side: TradeSide;
   entry: string;
+  entryMin: string;
+  entryMax: string;
   stopLoss: string;
   takeProfit: string;
   volume: string;

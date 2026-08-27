@@ -6,7 +6,8 @@ import { mt5Context, testConfig } from "./helpers.js";
 function baseSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   const timestamp = new Date().toISOString();
   return { id: "SIG-1", telegramChatId: "1", telegramMessageId: "1", source: "TELEGRAM", chatName: "Test", originalMessage: "",
-    aiResultJson: null, validationResultJson: null, symbol: "XAUUSD", side: "BUY", entry: "100", stopLoss: "99", takeProfit: "102",
+    aiResultJson: null, validationResultJson: null, symbol: "XAUUSD", side: "BUY", entry: "100", entryMin: "100", entryMax: "100",
+    stopLoss: "99", takeProfit: "102",
     requestedLot: null, approvedLot: null, riskPercentage: "1", confidence: 1, receivedAt: timestamp,
     expiresAt: new Date(Date.now() + 60_000).toISOString(), status: "VALIDATED", rejectionCode: null, rejectionReason: null,
     createdAt: timestamp, updatedAt: timestamp, version: 1, ...overrides };
@@ -22,6 +23,11 @@ describe("RiskEngine", () => {
     const context = mt5Context();
     const decision = new RiskEngine(testConfig()).evaluate(baseSignal({ requestedLot: "0.25", riskPercentage: null }), context, context.symbols[0]!);
     expect(decision).toMatchObject({ approved: true, volume: "0.25", policy: "FIXED_LOT" });
+  });
+  it("usa el extremo de mayor perdida del rango", () => {
+    const context = mt5Context();
+    const decision = new RiskEngine(testConfig()).evaluate(baseSignal({ entryMin: "100", entryMax: "101", riskPercentage: "1" }), context, context.symbols[0]!);
+    expect(decision).toMatchObject({ approved: true, volume: "0.5", estimatedLoss: "100" });
   });
   it("rechaza riesgo superior al límite", () => {
     const context = mt5Context();

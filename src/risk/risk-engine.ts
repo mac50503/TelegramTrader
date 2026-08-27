@@ -12,9 +12,9 @@ export class RiskEngine {
   constructor(private readonly config: AppConfig) {}
 
   evaluate(signal: TradeSignal, context: Mt5Context, spec: SymbolSpecification): RiskDecision {
-    if (!signal.entry || !signal.stopLoss) return { approved: false, code: "MISSING_PRICE", reason: "Entry and stop loss are required" };
+    if (!signal.entryMin || !signal.entryMax || !signal.stopLoss) return { approved: false, code: "MISSING_PRICE", reason: "Entry range and stop loss are required" };
     try {
-      const entry = new Decimal(signal.entry);
+      const entry = new Decimal(signal.side === "BUY" ? signal.entryMax : signal.entryMin);
       const stop = new Decimal(signal.stopLoss);
       const tickSize = new Decimal(spec.tickSize);
       const tickValueLoss = new Decimal(spec.tickValueLoss);

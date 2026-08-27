@@ -18,7 +18,8 @@ describe("repositorio y cola", () => {
   it("reserva una señal una sola vez", () => {
     const message = { chatId: "1", messageId: "1", timestamp: new Date().toISOString(), text: "BUY", chatName: "test", source: "TELEGRAM" as const };
     const signal = repo.createFromTelegram(message, new Date(Date.now() + 60_000).toISOString())!;
-    repo.saveAnalysis(signal.id, { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "100", stopLoss: "99", takeProfit: "102", lot: "0.1", confidence: 1 });
+    repo.saveAnalysis(signal.id, { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "100", entryMin: "100", entryMax: "100",
+      stopLoss: "99", takeProfit: "102", lot: "0.1", confidence: 1 });
     repo.saveValidated(signal.id, "0.1", "{}"); repo.setStatus(signal.id, "QUEUED");
     expect(repo.assignNext("ea-1", "SIMULATION")).not.toBeNull();
     expect(repo.assignNext("ea-2", "SIMULATION")).toBeNull();

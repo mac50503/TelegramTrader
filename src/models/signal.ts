@@ -23,6 +23,8 @@ export type SignalAnalysis =
       symbol: string;
       side: TradeSide;
       entry: string;
+      entryMin: string;
+      entryMax: string;
       stopLoss: string;
       takeProfit: string;
       lot?: string | undefined;
@@ -42,6 +44,8 @@ export interface TradeSignal {
   symbol: string | null;
   side: TradeSide | null;
   entry: string | null;
+  entryMin: string | null;
+  entryMax: string | null;
   stopLoss: string | null;
   takeProfit: string | null;
   requestedLot: string | null;

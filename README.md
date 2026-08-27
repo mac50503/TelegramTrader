@@ -16,7 +16,7 @@ El proyecto inicia siempre en `SIMULATION`. El agente de IA interpreta texto, pe
 - Ejecución simulada con precios recibidos por MT5.
 - LIVE deshabilitado por defecto y protegido por confirmaciones múltiples.
 
-El MVP ejecuta órdenes de mercado. `entry` es el precio de referencia de la señal; el precio real puede diferir. Las órdenes limit/stop quedan fuera de esta versión.
+El EA espera a que el precio de mercado esté dentro de `MaxEntryDeviationPoints` respecto de `entry` antes de ejecutar. Si no llega en `MaxEntryWaitSeconds`, rechaza la operación. La ejecución final sigue siendo una orden de mercado y puede tener un deslizamiento máximo configurado por `MaxSlippagePoints`; las órdenes limit/stop quedan fuera de esta versión.
 
 ## Arquitectura
 
@@ -314,7 +314,7 @@ LIVE_TRADING_CONFIRM=I_UNDERSTAND_LIVE_TRADING
 MT5_ALLOWED_ACCOUNT_IDS=123456
 ```
 
-El EA requiere además `EnableLiveTrading=true` y AutoTrading habilitado. Si Node y EA no coinciden en el modo, la operación se rechaza.
+El EA requiere además `EnableLiveTrading=true` y AutoTrading habilitado. Para pruebas LIVE en demo, mantenga `RequireDemoAccountForLive=true`; esta protección bloquea cuentas reales. Si Node y EA no coinciden en el modo, la operación se rechaza.
 
 Una request enviada no se considera éxito. El EA comprueba `ResultRetcode`, deal y posición antes de reportar `FILLED`.
 
