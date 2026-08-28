@@ -10,7 +10,7 @@ function baseSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
     stopLoss: "99", takeProfit: "102",
     requestedLot: null, approvedLot: null, riskPercentage: "1", confidence: 1, receivedAt: timestamp,
     expiresAt: new Date(Date.now() + 60_000).toISOString(), status: "VALIDATED", rejectionCode: null, rejectionReason: null,
-    createdAt: timestamp, updatedAt: timestamp, version: 1, ...overrides };
+    createdAt: timestamp, updatedAt: timestamp, version: 1, signalGroupId: "SIG-1", legIndex: 0, legCount: 1, ...overrides };
 }
 
 describe("RiskEngine", () => {

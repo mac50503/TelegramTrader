@@ -27,6 +27,10 @@ export const closeSchema = z.object({
   closeReason: z.string().min(1).max(200), closedAt: timestamp
 }).strict();
 
+export const slUpdateSchema = z.object({
+  clientId: z.string().min(1), assignmentToken: z.string().min(20), newStopLoss: decimal, reason: z.string().min(1).max(200)
+}).strict();
+
 const symbolSpecSchema = z.object({
   canonicalSymbol: z.string().min(3).max(30).transform((value) => value.toUpperCase()), brokerSymbol: z.string().min(1).max(50),
   digits: z.number().int().min(0).max(12), point: decimal, tickSize: decimal, tickValueProfit: decimal,

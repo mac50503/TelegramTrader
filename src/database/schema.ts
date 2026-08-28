@@ -41,11 +41,15 @@ CREATE TABLE IF NOT EXISTS signals (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
-  UNIQUE(source, telegram_chat_id, telegram_message_id)
+  signal_group_id TEXT,
+  leg_index INTEGER NOT NULL DEFAULT 0,
+  leg_count INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_queue ON signals(status, received_at);
 CREATE INDEX IF NOT EXISTS idx_signals_semantic ON signals(symbol, side, entry, stop_loss, take_profit, received_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_dedup ON signals(source, telegram_chat_id, telegram_message_id, leg_index);
+CREATE INDEX IF NOT EXISTS idx_signals_group ON signals(signal_group_id);
 
 CREATE TABLE IF NOT EXISTS signal_status_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

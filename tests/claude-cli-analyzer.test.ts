@@ -5,8 +5,8 @@ import { AppError } from "../src/shared/errors.js";
 // Fixtures captured from a real `claude -p --output-format json --json-schema ...` run.
 const SIGNAL_ENVELOPE = JSON.stringify({
   is_error: false, subtype: "success", type: "result",
-  result: "{\"isSignal\":true,\"symbol\":\"XAUUSD\",\"side\":\"BUY\",\"entry\":3345,\"stopLoss\":3335,\"takeProfit\":3370,\"confidence\":0.95}",
-  structured_output: { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: 3345, stopLoss: 3335, takeProfit: 3370, confidence: 0.95 }
+  result: "{\"isSignal\":true,\"symbol\":\"XAUUSD\",\"side\":\"BUY\",\"entry\":3345,\"stopLoss\":3335,\"takeProfits\":[3370],\"confidence\":0.95}",
+  structured_output: { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: 3345, stopLoss: 3335, takeProfits: [3370], confidence: 0.95 }
 });
 
 const NO_SIGNAL_ENVELOPE = JSON.stringify({

@@ -11,6 +11,7 @@ function signal(overrides: Partial<TradeSignal> = {}): TradeSignal {
     entry: "3345", entryMin: "3345", entryMax: "3345", stopLoss: "3335", takeProfit: "3370", requestedLot: "0.1", approvedLot: null,
     riskPercentage: null, confidence: 0.98, receivedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(),
     status: "ANALYZING", rejectionCode: null, rejectionReason: null, createdAt: now.toISOString(), updatedAt: now.toISOString(), version: 1,
+    signalGroupId: "SIG-TEST", legIndex: 0, legCount: 1,
     ...overrides
   };
 }

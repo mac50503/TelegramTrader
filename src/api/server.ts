@@ -10,7 +10,7 @@ import { AppError, NotFoundError } from "../shared/errors.js";
 import { secureEqual } from "../shared/security.js";
 import { logEvent } from "../logging/logger.js";
 import { SETTINGS_PAGE_HTML } from "./settings-page.js";
-import { assignedSchema, clientQuerySchema, closeSchema, contextSchema, executionSchema, settingsUpdateSchema, signalListQuerySchema } from "./schemas.js";
+import { assignedSchema, clientQuerySchema, closeSchema, contextSchema, executionSchema, settingsUpdateSchema, signalListQuerySchema, slUpdateSchema } from "./schemas.js";
 
 function header(request: FastifyRequest, name: string): string {
   const value = request.headers[name.toLowerCase()];
@@ -87,8 +87,8 @@ export async function buildServer(
       return { hasSignal: false, reason: "MT5_CONTEXT_REQUIRED" };
     }
     pipeline.processValidated(context);
-    if (repositories.countActiveTrades() >= config.risk.maxSimultaneousTrades) return { hasSignal: false, reason: "ACTIVE_TRADE_EXISTS" };
-    const signal = repositories.assignNext(clientId, config.tradingMode);
+    if (repositories.countActiveTradesForClient(clientId) >= config.risk.maxSimultaneousTrades) return { hasSignal: false, reason: "ACTIVE_TRADE_EXISTS" };
+    const signal = repositories.assignNext(clientId, config.tradingMode, config.risk.maxSimultaneousTrades);
     if (signal) {
       logEvent(logger, "SIGNAL_ASSIGNED", { signalId: signal.signalId, tradeId: signal.tradeId, source: "REST", status: "ASSIGNED", clientId });
       repositories.recordEvent("SIGNAL_ASSIGNED", { signalId: signal.signalId, tradeId: signal.tradeId, source: "REST", status: "ASSIGNED", payload: { clientId } });
@@ -98,9 +98,9 @@ export async function buildServer(
 
   app.get("/api/trades/current", async (request) => {
     const { clientId } = clientQuerySchema.parse(request.query);
-    const signal = repositories.currentAssignment(clientId);
-    const trade = signal ? repositories.findTradeBySignalId(signal.signalId) : null;
-    return signal ? { hasTrade: true, signal, trade } : { hasTrade: false };
+    const signals = repositories.currentAssignments(clientId);
+    const trades = signals.map((signal) => ({ signal, trade: repositories.findTradeBySignalId(signal.signalId) }));
+    return { hasTrade: trades.length > 0, trades };
   });
 
   app.post<{ Params: { signalId: string } }>("/api/trades/:signalId/assigned", async (request, reply) =>
@@ -130,6 +130,15 @@ export async function buildServer(
       const trade = repositories.recordClose({ ...body, signalId: request.params.signalId });
       logEvent(logger, "POSITION_CLOSED", { signalId: request.params.signalId, tradeId: trade.id, source: "MT5", status: "CLOSED" });
       repositories.recordEvent("POSITION_CLOSED", { signalId: request.params.signalId, tradeId: trade.id, source: "MT5", status: "CLOSED", payload: { netProfit: body.netProfit, reason: body.closeReason } });
+      return { trade };
+    }));
+
+  app.post<{ Params: { signalId: string } }>("/api/trades/:signalId/sl-updated", async (request, reply) =>
+    idempotent(request, reply, repositories, `sl-updated:${request.params.signalId}`, () => {
+      const body = slUpdateSchema.parse(request.body);
+      const trade = repositories.recordSlUpdate({ ...body, signalId: request.params.signalId });
+      logEvent(logger, "SL_UPDATED", { signalId: request.params.signalId, tradeId: trade.id, source: "MT5", status: trade.status });
+      repositories.recordEvent("SL_UPDATED", { signalId: request.params.signalId, tradeId: trade.id, source: "MT5", status: trade.status, payload: { newStopLoss: body.newStopLoss, reason: body.reason } });
       return { trade };
     }));
 

@@ -30,6 +30,9 @@ export interface TradeAssignment {
   takeProfit: string;
   volume: string;
   expiresAt: string;
+  groupId: string;
+  legIndex: number;
+  legCount: number;
 }
 
 export interface Mt5Context {

@@ -18,18 +18,21 @@ export interface SignalRepository {
   saveAnalysis(id: string, analysis: SignalAnalysis): void;
   saveValidated(id: string, approvedLot: string, validationJson: string): void;
   hasSemanticDuplicate(signal: TradeSignal, since: string): boolean;
+  createSiblingLeg(parent: TradeSignal, legIndex: number, legCount: number, takeProfit: string, groupId: string): TradeSignal;
 }
 
 export interface TradeRepository {
-  assignNext(clientId: string, mode: "SIMULATION" | "LIVE"): TradeAssignment | null;
-  currentAssignment(clientId: string): TradeAssignment | null;
+  assignNext(clientId: string, mode: "SIMULATION" | "LIVE", maxSimultaneousTrades: number): TradeAssignment | null;
+  currentAssignments(clientId: string): TradeAssignment[];
   acknowledge(signalId: string, clientId: string, assignmentToken: string): Trade;
   recordExecution(input: RecordExecutionInput): Trade;
   recordClose(input: RecordCloseInput): Trade;
+  recordSlUpdate(input: RecordSlUpdateInput): Trade;
   findTradeBySignalId(signalId: string): Trade | null;
   countDailyTrades(dayStart: string, mode: TradingMode): number;
   realizedDailyLoss(dayStart: string, mode: TradingMode): string;
   countActiveTrades(): number;
+  countActiveTradesForClient(clientId: string): number;
 }
 
 export interface ContextRepository {
@@ -80,4 +83,12 @@ export interface RecordCloseInput {
   netProfit: string;
   closeReason: string;
   closedAt: string;
+}
+
+export interface RecordSlUpdateInput {
+  signalId: string;
+  clientId: string;
+  assignmentToken: string;
+  newStopLoss: string;
+  reason: string;
 }

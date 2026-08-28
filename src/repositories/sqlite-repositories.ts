@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { Decimal } from "decimal.js";
 import type {
-  AuditRepository, ContextRepository, IdempotencyRepository, RecordCloseInput, RecordExecutionInput,
+  AuditRepository, ContextRepository, IdempotencyRepository, RecordCloseInput, RecordExecutionInput, RecordSlUpdateInput,
   SignalRepository, TradeRepository
 } from "../application/ports.js";
 import type { SignalAnalysis, SignalStatus, TelegramMessage, TradeSignal, TradingMode } from "../models/signal.js";
@@ -34,7 +34,9 @@ function mapSignal(row: Row): TradeSignal {
     confidence: row.confidence === null ? null : Number(row.confidence), receivedAt: String(row.received_at), expiresAt: String(row.expires_at),
     status: row.status as SignalStatus, rejectionCode: row.rejection_code === null ? null : String(row.rejection_code),
     rejectionReason: row.rejection_reason === null ? null : String(row.rejection_reason), createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at), version: Number(row.version)
+    updatedAt: String(row.updated_at), version: Number(row.version),
+    signalGroupId: row.signal_group_id === null ? null : String(row.signal_group_id),
+    legIndex: Number(row.leg_index ?? 0), legCount: Number(row.leg_count ?? 1)
   };
 }
 
@@ -61,9 +63,10 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       const id = `SIG-${date}-${String(counter.value).padStart(6, "0")}`;
       const timestamp = now();
       this.db.prepare(`INSERT INTO signals(
-        id,telegram_chat_id,telegram_message_id,source,chat_name,original_message,received_at,expires_at,status,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, message.chatId, message.messageId, message.source, message.chatName, message.text,
-        message.timestamp, expiresAt, "RECEIVED", timestamp, timestamp);
+        id,telegram_chat_id,telegram_message_id,source,chat_name,original_message,received_at,expires_at,status,created_at,updated_at,
+        signal_group_id,leg_index,leg_count
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1)`).run(id, message.chatId, message.messageId, message.source, message.chatName, message.text,
+        message.timestamp, expiresAt, "RECEIVED", timestamp, timestamp, id);
       this.db.prepare("INSERT INTO signal_status_history(signal_id,to_status,created_at) VALUES(?,?,?)").run(id, "RECEIVED", timestamp);
       return this.findById(id);
     })();
@@ -96,11 +99,30 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
   saveAnalysis(id: string, analysis: SignalAnalysis): void {
     const detected = analysis.isSignal ? analysis : null;
     const result = this.db.prepare(`UPDATE signals SET ai_result_json=?,symbol=?,side=?,entry=?,entry_min=?,entry_max=?,stop_loss=?,take_profit=?,requested_lot=?,
-      risk_percentage=?,confidence=?,analyzed_at=?,updated_at=?,version=version+1 WHERE id=?`).run(
+      risk_percentage=?,confidence=?,leg_count=?,analyzed_at=?,updated_at=?,version=version+1 WHERE id=?`).run(
       json(analysis), detected?.symbol ?? null, detected?.side ?? null, detected?.entry ?? null,
       detected?.entryMin ?? null, detected?.entryMax ?? null, detected?.stopLoss ?? null,
-      detected?.takeProfit ?? null, detected?.lot ?? null, detected?.riskPercentage ?? null, detected?.confidence ?? null, now(), now(), id);
+      detected?.takeProfits[0] ?? null, detected?.lot ?? null, detected?.riskPercentage ?? null, detected?.confidence ?? null,
+      detected?.takeProfits.length ?? 1, now(), now(), id);
     if (result.changes !== 1) throw new NotFoundError("Signal");
+  }
+
+  createSiblingLeg(parent: TradeSignal, legIndex: number, legCount: number, takeProfit: string, groupId: string): TradeSignal {
+    return this.db.transaction(() => {
+      const id = `${parent.id}-TP${legIndex + 1}`;
+      const timestamp = now();
+      this.db.prepare(`INSERT INTO signals(
+        id,telegram_chat_id,telegram_message_id,source,chat_name,original_message,ai_result_json,
+        symbol,side,entry,entry_min,entry_max,stop_loss,take_profit,requested_lot,risk_percentage,confidence,
+        received_at,expires_at,status,created_at,updated_at,signal_group_id,leg_index,leg_count
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, parent.telegramChatId, parent.telegramMessageId, parent.source, parent.chatName, parent.originalMessage, parent.aiResultJson,
+        parent.symbol, parent.side, parent.entry, parent.entryMin, parent.entryMax, parent.stopLoss, takeProfit,
+        parent.requestedLot, parent.riskPercentage, parent.confidence,
+        parent.receivedAt, parent.expiresAt, "ANALYZING", timestamp, timestamp, groupId, legIndex, legCount);
+      this.db.prepare("INSERT INTO signal_status_history(signal_id,to_status,created_at) VALUES(?,?,?)").run(id, "ANALYZING", timestamp);
+      return this.findById(id)!;
+    })();
   }
 
   saveValidated(id: string, approvedLot: string, validationJson: string): void {
@@ -117,10 +139,10 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       .get(signal.id, signal.source, signal.symbol, signal.side, signal.entryMin, signal.entryMax, signal.stopLoss, signal.takeProfit, since));
   }
 
-  assignNext(clientId: string, mode: "SIMULATION" | "LIVE"): TradeAssignment | null {
+  assignNext(clientId: string, mode: "SIMULATION" | "LIVE", maxSimultaneousTrades: number): TradeAssignment | null {
     return this.db.transaction(() => {
-      const active = this.db.prepare("SELECT 1 FROM trades WHERE status IN ('ASSIGNED','SUBMITTED','FILLED','UNKNOWN') LIMIT 1").get();
-      if (active) return null;
+      const active = this.countActiveTradesForClient(clientId);
+      if (active >= maxSimultaneousTrades) return null;
       const row = this.db.prepare("SELECT * FROM signals WHERE status='QUEUED' AND expires_at>? ORDER BY received_at,id LIMIT 1").get(now()) as Row | undefined;
       if (!row) return null;
       const signal = mapSignal(row);
@@ -131,23 +153,31 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       this.db.prepare(`INSERT INTO trades(id,signal_id,client_id,assignment_token,status,trading_mode,assigned_at,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?)`).run(tradeId, signal.id, clientId, token, "ASSIGNED", mode, timestamp, timestamp, timestamp);
       this.setStatus(signal.id, "ASSIGNED");
-      return { signalId: signal.id, tradeId, assignmentToken: token, mode, symbol: signal.symbol, side: signal.side,
-        entry: signal.entry, entryMin: signal.entryMin, entryMax: signal.entryMax, stopLoss: signal.stopLoss,
-        takeProfit: signal.takeProfit, volume: signal.approvedLot, expiresAt: signal.expiresAt };
+      return this.mapAssignment({ ...row, trade_id: tradeId, assignment_token: token, trading_mode: mode });
     })();
   }
 
-  currentAssignment(clientId: string): TradeAssignment | null {
-    const row = this.db.prepare(`SELECT t.id trade_id,t.assignment_token,t.trading_mode,s.* FROM trades t JOIN signals s ON s.id=t.signal_id
-      WHERE t.client_id=? AND t.status IN ('ASSIGNED','SUBMITTED','FILLED','UNKNOWN') ORDER BY t.assigned_at DESC LIMIT 1`).get(clientId) as Row | undefined;
-    if (!row || !row.symbol || !row.side || !row.entry || !row.stop_loss || !row.take_profit || !row.approved_lot) return null;
+  countActiveTradesForClient(clientId: string): number {
+    return Number((this.db.prepare("SELECT COUNT(*) count FROM trades WHERE client_id=? AND status IN ('ASSIGNED','SUBMITTED','FILLED','UNKNOWN')")
+      .get(clientId) as { count: number }).count);
+  }
+
+  currentAssignments(clientId: string): TradeAssignment[] {
+    const rows = this.db.prepare(`SELECT t.id trade_id,t.assignment_token,t.trading_mode,s.* FROM trades t JOIN signals s ON s.id=t.signal_id
+      WHERE t.client_id=? AND t.status IN ('ASSIGNED','SUBMITTED','FILLED','UNKNOWN') ORDER BY t.assigned_at`).all(clientId) as Row[];
+    return rows.filter((row) => row.symbol && row.side && row.entry && row.stop_loss && row.take_profit && row.approved_lot)
+      .map((row) => this.mapAssignment(row));
+  }
+
+  private mapAssignment(row: Row): TradeAssignment {
     const entryMin = row.entry_min ?? row.entry;
     const entryMax = row.entry_max ?? row.entry;
     return { signalId: String(row.id), tradeId: String(row.trade_id), assignmentToken: String(row.assignment_token),
       mode: row.trading_mode as TradeAssignment["mode"], symbol: String(row.symbol), side: row.side as TradeAssignment["side"],
       entry: String(row.entry), entryMin: String(entryMin), entryMax: String(entryMax),
       stopLoss: String(row.stop_loss), takeProfit: String(row.take_profit), volume: String(row.approved_lot),
-      expiresAt: String(row.expires_at) };
+      expiresAt: String(row.expires_at),
+      groupId: String(row.signal_group_id ?? row.id), legIndex: Number(row.leg_index ?? 0), legCount: Number(row.leg_count ?? 1) };
   }
 
   acknowledge(signalId: string, clientId: string, assignmentToken: string): Trade {
@@ -202,6 +232,17 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
       this.db.prepare("UPDATE trades SET status='CLOSED',closed_at=?,updated_at=?,version=version+1 WHERE id=?").run(input.closedAt, now(), trade.id);
       this.setStatus(input.signalId, "CLOSED");
       return this.requiredTrade(input.signalId);
+    })();
+  }
+
+  recordSlUpdate(input: RecordSlUpdateInput): Trade {
+    return this.db.transaction(() => {
+      const trade = this.requiredTrade(input.signalId);
+      if (trade.clientId !== input.clientId || trade.assignmentToken !== input.assignmentToken) throw new ConflictError("INVALID_ASSIGNMENT", "Invalid assignment token");
+      if (trade.status !== "FILLED") throw new ConflictError("TRADE_NOT_OPEN", "Trade has no confirmed open position");
+      const result = this.db.prepare("UPDATE positions SET stop_loss=? WHERE trade_id=? AND status='OPEN'").run(input.newStopLoss, trade.id);
+      if (result.changes !== 1) throw new ConflictError("POSITION_NOT_OPEN", "No open position was found");
+      return trade;
     })();
   }
 

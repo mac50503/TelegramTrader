@@ -11,7 +11,7 @@ const detectedSignalSchema = z.object({
     entryMin: decimal.optional(),
     entryMax: decimal.optional(),
     stopLoss: decimal,
-    takeProfit: decimal,
+    takeProfits: z.array(decimal).min(1),
     lot: decimal.optional(),
     riskPercentage: decimal.optional(),
     confidence: z.number().min(0).max(1)

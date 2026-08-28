@@ -26,7 +26,7 @@ export type SignalAnalysis =
       entryMin: string;
       entryMax: string;
       stopLoss: string;
-      takeProfit: string;
+      takeProfits: string[];
       lot?: string | undefined;
       riskPercentage?: string | undefined;
       confidence: number;
@@ -49,6 +49,9 @@ export interface TradeSignal {
   stopLoss: string | null;
   takeProfit: string | null;
   requestedLot: string | null;
+  signalGroupId: string | null;
+  legIndex: number;
+  legCount: number;
   approvedLot: string | null;
   riskPercentage: string | null;
   confidence: number | null;

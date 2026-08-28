@@ -46,25 +46,13 @@ export class SignalPipeline {
         this.audit.recordEvent("SIGNAL_IGNORED", { signalId: signal.id, source: message.source, status: "IGNORED" });
         return this.signals.findById(signal.id);
       }
-      logEvent(this.logger, "SIGNAL_DETECTED", {
-        signalId: signal.id, source: message.source, status: "ANALYZING", chatName: message.chatName,
-        symbol: normalized.symbol, side: normalized.side, confidence: normalized.confidence
-      });
-      this.audit.recordEvent("SIGNAL_DETECTED", {
-        signalId: signal.id, source: message.source, status: "ANALYZING",
-        payload: { symbol: normalized.symbol, side: normalized.side, confidence: normalized.confidence }
-      });
-      const analyzed = this.signals.findById(signal.id)!;
-      const validation = this.validator.validate(analyzed);
-      if (!validation.valid) return this.reject(analyzed, validation.code, validation.reason);
-      const since = new Date(Date.parse(analyzed.receivedAt) - this.config.signal.duplicateWindowSeconds * 1_000).toISOString();
-      if (this.signals.hasSemanticDuplicate(analyzed, since)) return this.reject(analyzed, "DUPLICATE_SIGNAL", "Equivalent signal already exists within duplicate window");
-      this.signals.setStatus(signal.id, "VALIDATED");
-      logEvent(this.logger, "SIGNAL_VALIDATED", { signalId: signal.id, source: message.source, status: "VALIDATED", chatName: message.chatName });
-      this.audit.recordEvent("SIGNAL_VALIDATED", { signalId: signal.id, source: message.source, status: "VALIDATED" });
-      const context = this.contexts.findLatestContext();
-      if (context) this.applyRiskAndQueue(signal.id, context);
-      return this.signals.findById(signal.id);
+      const legCount = normalized.takeProfits.length;
+      for (let legIndex = 1; legIndex < legCount; legIndex++) {
+        const parent = this.signals.findById(signal.id)!;
+        const sibling = this.signals.createSiblingLeg(parent, legIndex, legCount, normalized.takeProfits[legIndex]!, signal.id);
+        this.processLeg(sibling.id);
+      }
+      return this.processLeg(signal.id);
     } catch (error) {
       const appError = error instanceof AppError ? error : new AppError("PIPELINE_ERROR", error instanceof Error ? error.message : "Unknown pipeline error", 500);
       this.signals.setStatus(signal.id, "ERROR", { code: appError.code, message: appError.message });
@@ -77,6 +65,37 @@ export class SignalPipeline {
 
   processValidated(context: Mt5Context): void {
     for (const signal of this.signals.list(100, 0, "VALIDATED")) this.applyRiskAndQueue(signal.id, context);
+  }
+
+  private processLeg(signalId: string): TradeSignal {
+    const analyzed = this.signals.findById(signalId)!;
+    try {
+      logEvent(this.logger, "SIGNAL_DETECTED", {
+        signalId, source: analyzed.source, status: "ANALYZING", chatName: analyzed.chatName,
+        symbol: analyzed.symbol, side: analyzed.side, confidence: analyzed.confidence
+      });
+      this.audit.recordEvent("SIGNAL_DETECTED", {
+        signalId, source: analyzed.source, status: "ANALYZING",
+        payload: { symbol: analyzed.symbol, side: analyzed.side, confidence: analyzed.confidence, legIndex: analyzed.legIndex, legCount: analyzed.legCount }
+      });
+      const validation = this.validator.validate(analyzed);
+      if (!validation.valid) return this.reject(analyzed, validation.code, validation.reason);
+      const since = new Date(Date.parse(analyzed.receivedAt) - this.config.signal.duplicateWindowSeconds * 1_000).toISOString();
+      if (this.signals.hasSemanticDuplicate(analyzed, since)) return this.reject(analyzed, "DUPLICATE_SIGNAL", "Equivalent signal already exists within duplicate window");
+      this.signals.setStatus(signalId, "VALIDATED");
+      logEvent(this.logger, "SIGNAL_VALIDATED", { signalId, source: analyzed.source, status: "VALIDATED", chatName: analyzed.chatName });
+      this.audit.recordEvent("SIGNAL_VALIDATED", { signalId, source: analyzed.source, status: "VALIDATED" });
+      const context = this.contexts.findLatestContext();
+      if (context) this.applyRiskAndQueue(signalId, context);
+      return this.signals.findById(signalId)!;
+    } catch (error) {
+      const appError = error instanceof AppError ? error : new AppError("PIPELINE_ERROR", error instanceof Error ? error.message : "Unknown pipeline error", 500);
+      this.signals.setStatus(signalId, "ERROR", { code: appError.code, message: appError.message });
+      this.logger.error({ event: "SYSTEM_ERROR", signalId, code: appError.code, err: appError }, appError.message);
+      this.audit.recordError({ signalId, code: appError.code, message: appError.message, details: appError.details });
+      this.audit.recordEvent("SYSTEM_ERROR", { signalId, source: analyzed.source, status: "ERROR", payload: { code: appError.code } });
+      return this.signals.findById(signalId)!;
+    }
   }
 
   private applyRiskAndQueue(signalId: string, context: Mt5Context): void {

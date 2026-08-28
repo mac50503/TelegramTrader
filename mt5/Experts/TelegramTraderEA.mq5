@@ -1,11 +1,13 @@
 #property copyright "TelegramTrader"
-#property version   "1.100"
+#property version   "2.000"
 #property strict
 #property description "Cliente REST para TelegramTrader. Añada la URL en Tools > Options > Expert Advisors > WebRequest."
 
 #include <Trade/Trade.mqh>
 #include "../Include/TelegramTraderHttp.mqh"
 #include "../Include/TelegramTraderJson.mqh"
+
+#define MAX_SLOTS 10
 
 enum EEAState
   {
@@ -31,39 +33,73 @@ input int MaxEntryDeviationPoints=50;
 input int MaxEntryWaitSeconds=900;
 input int MaxSlippagePoints=20;
 
+// Cada slot representa una entrada activa (asignada por el servidor) hasta que se cierra o se
+// rechaza. La capacidad del EA es fija (MAX_SLOTS); el límite real de entradas simultáneas lo
+// impone el servidor vía MAX_SIMULTANEOUS_TRADES, así no hay que sincronizar dos configuraciones.
+struct ActiveTrade
+  {
+   bool             used;
+   EEAState         state;
+   bool             simulatedPosition;
+   bool             orderAlreadySent;
+   string           signalId;
+   string           tradeId;
+   string           assignmentToken;
+   string           groupId;
+   int              legIndex;
+   int              legCount;
+   string           mode;
+   string           symbol;
+   string           side;
+   double           entry;
+   double           entryMin;
+   double           entryMax;
+   double           stopLoss;
+   double           takeProfit;
+   double           volume;
+   double           filledPrice;
+   ulong            positionTicket;
+   ulong            pendingOrderTicket;
+   datetime         entryWaitStarted;
+   string           pendingExecutionResult;
+   double           pendingExecutionPrice;
+   ulong            pendingOrderTicketResult;
+   ulong            pendingDealTicket;
+   ulong            pendingPositionTicket;
+   string           pendingRetcode;
+   string           pendingDescription;
+  };
+
+ActiveTrade Slots[MAX_SLOTS];
 CTelegramTraderHttp Http;
 CTrade Trade;
-EEAState State=IDLE;
 bool Busy=false;
-bool SimulatedPosition=false;
-bool OrderAlreadySent=false;
-string ActiveSignalId="";
-string ActiveTradeId="";
-string AssignmentToken="";
-string ActiveMode="SIMULATION";
-string ActiveSymbol="";
-string ActiveSide="";
-double ActiveEntry=0;
-double ActiveEntryMin=0;
-double ActiveEntryMax=0;
-double ActiveStopLoss=0;
-double ActiveTakeProfit=0;
-double ActiveVolume=0;
-ulong ActivePositionTicket=0;
-ulong ActivePendingOrderTicket=0;
-datetime ActiveEntryWaitStarted=0;
 datetime LastContextSent=0;
-string PendingExecutionResult="";
-double PendingExecutionPrice=0;
-ulong PendingOrderTicket=0;
-ulong PendingDealTicket=0;
-ulong PendingPositionTicket=0;
-string PendingRetcode="";
-string PendingDescription="";
 
-string NewRequestId(const string action)
+int FindFreeSlot(void)
   {
-   return ClientId+"-"+action+"-"+IntegerToString((long)GetTickCount64());
+   for(int i=0;i<MAX_SLOTS;i++) if(!Slots[i].used) return i;
+   return -1;
+  }
+
+void ResetSlot(int i)
+  {
+   Slots[i].used=false; Slots[i].state=IDLE;
+   Slots[i].simulatedPosition=false; Slots[i].orderAlreadySent=false;
+   Slots[i].signalId=""; Slots[i].tradeId=""; Slots[i].assignmentToken=""; Slots[i].groupId="";
+   Slots[i].legIndex=0; Slots[i].legCount=1;
+   Slots[i].mode="SIMULATION"; Slots[i].symbol=""; Slots[i].side="";
+   Slots[i].entry=0; Slots[i].entryMin=0; Slots[i].entryMax=0; Slots[i].stopLoss=0; Slots[i].takeProfit=0;
+   Slots[i].volume=0; Slots[i].filledPrice=0; Slots[i].positionTicket=0; Slots[i].pendingOrderTicket=0;
+   Slots[i].entryWaitStarted=0;
+   Slots[i].pendingExecutionResult=""; Slots[i].pendingExecutionPrice=0;
+   Slots[i].pendingOrderTicketResult=0; Slots[i].pendingDealTicket=0; Slots[i].pendingPositionTicket=0;
+   Slots[i].pendingRetcode=""; Slots[i].pendingDescription="";
+  }
+
+string NewRequestId(const string action,const int slot=-1)
+  {
+   return ClientId+"-"+action+(slot>=0 ? "-"+IntegerToString(slot) : "")+"-"+IntegerToString((long)GetTickCount64());
   }
 
 string SelectedBrokerSymbol(void)
@@ -107,109 +143,121 @@ bool PostContext(void)
    return false;
   }
 
-bool ParseAssignment(const string response)
+bool ParseAssignment(const string response,int i)
   {
-   ActiveSignalId=JsonString(response,"signalId");
-   ActiveTradeId=JsonString(response,"tradeId");
-   AssignmentToken=JsonString(response,"assignmentToken");
-   ActiveMode=JsonString(response,"mode","SIMULATION");
-   ActiveSymbol=JsonString(response,"symbol");
-   ActiveSide=JsonString(response,"side");
-   ActiveEntry=StringToDouble(JsonString(response,"entry","0"));
-   ActiveEntryMin=StringToDouble(JsonString(response,"entryMin",DoubleToString(ActiveEntry,8)));
-   ActiveEntryMax=StringToDouble(JsonString(response,"entryMax",DoubleToString(ActiveEntry,8)));
-   if(ActiveEntryMin>ActiveEntryMax)
+   Slots[i].signalId=JsonString(response,"signalId");
+   Slots[i].tradeId=JsonString(response,"tradeId");
+   Slots[i].assignmentToken=JsonString(response,"assignmentToken");
+   Slots[i].groupId=JsonString(response,"groupId");
+   Slots[i].legIndex=(int)StringToInteger(JsonString(response,"legIndex","0"));
+   Slots[i].legCount=(int)StringToInteger(JsonString(response,"legCount","1"));
+   Slots[i].mode=JsonString(response,"mode","SIMULATION");
+   Slots[i].symbol=JsonString(response,"symbol");
+   Slots[i].side=JsonString(response,"side");
+   Slots[i].entry=StringToDouble(JsonString(response,"entry","0"));
+   Slots[i].entryMin=StringToDouble(JsonString(response,"entryMin",DoubleToString(Slots[i].entry,8)));
+   Slots[i].entryMax=StringToDouble(JsonString(response,"entryMax",DoubleToString(Slots[i].entry,8)));
+   if(Slots[i].entryMin>Slots[i].entryMax)
      {
-      double swap=ActiveEntryMin;
-      ActiveEntryMin=ActiveEntryMax;
-      ActiveEntryMax=swap;
+      double swap=Slots[i].entryMin;
+      Slots[i].entryMin=Slots[i].entryMax;
+      Slots[i].entryMax=swap;
      }
-   ActiveStopLoss=StringToDouble(JsonString(response,"stopLoss","0"));
-   ActiveTakeProfit=StringToDouble(JsonString(response,"takeProfit","0"));
-   ActiveVolume=StringToDouble(JsonString(response,"volume","0"));
-   ActiveEntryWaitStarted=TimeCurrent();
-   return ActiveSignalId!="" && AssignmentToken!="" && ActiveSymbol!="" && ActiveVolume>0;
+   Slots[i].stopLoss=StringToDouble(JsonString(response,"stopLoss","0"));
+   Slots[i].takeProfit=StringToDouble(JsonString(response,"takeProfit","0"));
+   Slots[i].volume=StringToDouble(JsonString(response,"volume","0"));
+   Slots[i].entryWaitStarted=TimeCurrent();
+   return Slots[i].signalId!="" && Slots[i].assignmentToken!="" && Slots[i].symbol!="" && Slots[i].volume>0;
   }
 
-bool BasicSignalCheck(void)
+bool BasicSignalCheck(int i)
   {
-   if(ActiveSide!="BUY" && ActiveSide!="SELL") return false;
-   if(ActiveEntry<=0 || ActiveEntryMin<=0 || ActiveEntryMax<=0 || ActiveStopLoss<=0 || ActiveTakeProfit<=0 || ActiveVolume<=0) return false;
-   if(ActiveEntryMin>ActiveEntryMax) return false;
-   if(ActiveSide=="BUY" && !(ActiveStopLoss<ActiveEntryMin && ActiveTakeProfit>ActiveEntryMax)) return false;
-   if(ActiveSide=="SELL" && !(ActiveStopLoss>ActiveEntryMax && ActiveTakeProfit<ActiveEntryMin)) return false;
-   if(ActiveMode=="LIVE" && !EnableLiveTrading) return false;
-   if(ActiveMode=="LIVE" && RequireDemoAccountForLive &&
+   if(Slots[i].side!="BUY" && Slots[i].side!="SELL") return false;
+   if(Slots[i].entry<=0 || Slots[i].entryMin<=0 || Slots[i].entryMax<=0 || Slots[i].stopLoss<=0 || Slots[i].takeProfit<=0 || Slots[i].volume<=0) return false;
+   if(Slots[i].entryMin>Slots[i].entryMax) return false;
+   if(Slots[i].side=="BUY" && !(Slots[i].stopLoss<Slots[i].entryMin && Slots[i].takeProfit>Slots[i].entryMax)) return false;
+   if(Slots[i].side=="SELL" && !(Slots[i].stopLoss>Slots[i].entryMax && Slots[i].takeProfit<Slots[i].entryMin)) return false;
+   if(Slots[i].mode=="LIVE" && !EnableLiveTrading) return false;
+   if(Slots[i].mode=="LIVE" && RequireDemoAccountForLive &&
       (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE)!=ACCOUNT_TRADE_MODE_DEMO) return false;
    return true;
   }
 
-bool AcknowledgeAssignment(void)
+bool AcknowledgeAssignment(int i)
   {
-   string body="{\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(AssignmentToken)+"\"}";
+   string body="{\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(Slots[i].assignmentToken)+"\"}";
    string response;
-   int status=Http.Request("POST","/api/trades/"+ActiveSignalId+"/assigned",body,NewRequestId("assigned"),ActiveSignalId+"-assigned",response);
+   int status=Http.Request("POST","/api/trades/"+Slots[i].signalId+"/assigned",body,NewRequestId("assigned",i),Slots[i].signalId+"-assigned",response);
    return status>=200 && status<300;
   }
 
-bool ReportExecution(const string result,const double execution_price,const ulong order_ticket,const ulong deal_ticket,
+bool ReportExecution(int i,const string result,const double execution_price,const ulong order_ticket,const ulong deal_ticket,
                      const ulong position_ticket,const string retcode,const string description)
   {
    string executed=TimeToString(TimeGMT(),TIME_DATE|TIME_SECONDS);
    StringReplace(executed,".","-"); StringReplace(executed," ","T"); executed+="Z";
    string body="{";
-   body+="\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(AssignmentToken)+"\",";
-   body+="\"executionId\":\"EXE-"+JsonEscape(ActiveSignalId)+"\",\"result\":\""+result+"\",";
-   body+="\"requestedPrice\":\""+DoubleToString(ActiveEntry,8)+"\",\"executionPrice\":\""+DoubleToString(execution_price,8)+"\",";
-   body+="\"requestedVolume\":\""+DoubleToString(ActiveVolume,8)+"\",\"executedVolume\":\""+DoubleToString(ActiveVolume,8)+"\",";
+   body+="\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(Slots[i].assignmentToken)+"\",";
+   body+="\"executionId\":\"EXE-"+JsonEscape(Slots[i].signalId)+"\",\"result\":\""+result+"\",";
+   body+="\"requestedPrice\":\""+DoubleToString(Slots[i].entry,8)+"\",\"executionPrice\":\""+DoubleToString(execution_price,8)+"\",";
+   body+="\"requestedVolume\":\""+DoubleToString(Slots[i].volume,8)+"\",\"executedVolume\":\""+DoubleToString(Slots[i].volume,8)+"\",";
    body+="\"orderTicket\":\""+IntegerToString((long)order_ticket)+"\",\"dealTicket\":\""+IntegerToString((long)deal_ticket)+"\",";
    body+="\"positionTicket\":\""+IntegerToString((long)position_ticket)+"\",\"retcode\":\""+JsonEscape(retcode)+"\",";
    body+="\"errorDescription\":\""+JsonEscape(description)+"\",\"executedAt\":\""+executed+"\"}";
    string response;
-   int status=Http.Request("POST","/api/trades/"+ActiveSignalId+"/execution",body,ActiveSignalId+"-execution-request",ActiveSignalId+"-execution",response);
+   int status=Http.Request("POST","/api/trades/"+Slots[i].signalId+"/execution",body,Slots[i].signalId+"-execution-request",Slots[i].signalId+"-execution",response);
    return status>=200 && status<300;
   }
 
-void SetPendingExecution(const string result,const double price,const ulong order_ticket,const ulong deal_ticket,
+bool ReportSlUpdate(int i,const double newStopLoss,const string reason)
+  {
+   string body="{\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(Slots[i].assignmentToken)+"\",";
+   body+="\"newStopLoss\":\""+DoubleToString(newStopLoss,8)+"\",\"reason\":\""+JsonEscape(reason)+"\"}";
+   string response;
+   int status=Http.Request("POST","/api/trades/"+Slots[i].signalId+"/sl-updated",body,NewRequestId("sl-updated",i),Slots[i].signalId+"-sl-updated",response);
+   return status>=200 && status<300;
+  }
+
+void SetPendingExecution(int i,const string result,const double price,const ulong order_ticket,const ulong deal_ticket,
                          const ulong position_ticket,const string retcode,const string description)
   {
-   PendingExecutionResult=result;
-   PendingExecutionPrice=price;
-   PendingOrderTicket=order_ticket;
-   PendingDealTicket=deal_ticket;
-   PendingPositionTicket=position_ticket;
-   PendingRetcode=retcode;
-   PendingDescription=description;
+   Slots[i].pendingExecutionResult=result;
+   Slots[i].pendingExecutionPrice=price;
+   Slots[i].pendingOrderTicketResult=order_ticket;
+   Slots[i].pendingDealTicket=deal_ticket;
+   Slots[i].pendingPositionTicket=position_ticket;
+   Slots[i].pendingRetcode=retcode;
+   Slots[i].pendingDescription=description;
   }
 
-void TryReportPendingExecution(void)
+void TryReportPendingExecution(int i)
   {
-   if(PendingExecutionResult=="") return;
-   if(!ReportExecution(PendingExecutionResult,PendingExecutionPrice,PendingOrderTicket,PendingDealTicket,
-                       PendingPositionTicket,PendingRetcode,PendingDescription)) return;
-   string completedResult=PendingExecutionResult;
-   PendingExecutionResult="";
-   if(completedResult=="REJECTED") { ResetActive(); State=IDLE; }
-   else State=POSITION_OPEN;
+   if(Slots[i].pendingExecutionResult=="") return;
+   if(!ReportExecution(i,Slots[i].pendingExecutionResult,Slots[i].pendingExecutionPrice,Slots[i].pendingOrderTicketResult,
+                       Slots[i].pendingDealTicket,Slots[i].pendingPositionTicket,Slots[i].pendingRetcode,Slots[i].pendingDescription)) return;
+   string completedResult=Slots[i].pendingExecutionResult;
+   Slots[i].pendingExecutionResult="";
+   if(completedResult=="REJECTED") ResetSlot(i);
+   else Slots[i].state=POSITION_OPEN;
   }
 
-string ActiveOrderComment(void)
+string ActiveOrderComment(int i)
   {
-   return "TT-"+ActiveSignalId;
+   return "TT-"+Slots[i].signalId;
   }
 
-bool SelectActivePosition(double &open_price,ulong &deal_ticket)
+bool SelectActivePosition(int i,double &open_price,ulong &deal_ticket)
   {
    string symbol=SelectedBrokerSymbol();
-   for(int i=PositionsTotal()-1;i>=0;i--)
+   for(int p=PositionsTotal()-1;p>=0;p--)
      {
-      ulong ticket=PositionGetTicket(i);
+      ulong ticket=PositionGetTicket(p);
       if(ticket==0) continue;
       if(PositionGetString(POSITION_SYMBOL)!=symbol) continue;
       if((ulong)PositionGetInteger(POSITION_MAGIC)!=ExpertMagicNumber) continue;
       string comment=PositionGetString(POSITION_COMMENT);
-      if(comment!=ActiveOrderComment()) continue;
-      ActivePositionTicket=ticket;
+      if(comment!=ActiveOrderComment(i)) continue;
+      Slots[i].positionTicket=ticket;
       open_price=PositionGetDouble(POSITION_PRICE_OPEN);
       deal_ticket=0;
       ulong position_id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
@@ -231,320 +279,365 @@ bool SelectActivePosition(double &open_price,ulong &deal_ticket)
    return false;
   }
 
-bool RecoverPendingOrder(void)
+bool RecoverPendingOrder(int i)
   {
    string symbol=SelectedBrokerSymbol();
-   for(int i=OrdersTotal()-1;i>=0;i--)
+   for(int p=OrdersTotal()-1;p>=0;p--)
      {
-      ulong ticket=OrderGetTicket(i);
+      ulong ticket=OrderGetTicket(p);
       if(ticket==0) continue;
       if(OrderGetString(ORDER_SYMBOL)!=symbol) continue;
       if((ulong)OrderGetInteger(ORDER_MAGIC)!=ExpertMagicNumber) continue;
-      if(OrderGetString(ORDER_COMMENT)!=ActiveOrderComment()) continue;
+      if(OrderGetString(ORDER_COMMENT)!=ActiveOrderComment(i)) continue;
       ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(type!=ORDER_TYPE_BUY_LIMIT && type!=ORDER_TYPE_BUY_STOP &&
          type!=ORDER_TYPE_SELL_LIMIT && type!=ORDER_TYPE_SELL_STOP) continue;
-      ActivePendingOrderTicket=ticket;
-      OrderAlreadySent=true;
-      ActiveEntry=OrderGetDouble(ORDER_PRICE_OPEN);
+      Slots[i].pendingOrderTicket=ticket;
+      Slots[i].orderAlreadySent=true;
+      Slots[i].entry=OrderGetDouble(ORDER_PRICE_OPEN);
       return true;
      }
    return false;
   }
 
-void MonitorPendingOrder(void)
+void MonitorPendingOrder(int i)
   {
    double fill_price=0;
    ulong deal_ticket=0;
-   if(SelectActivePosition(fill_price,deal_ticket))
+   if(SelectActivePosition(i,fill_price,deal_ticket))
      {
-      ulong order_ticket=ActivePendingOrderTicket;
-      ActivePendingOrderTicket=0;
-      SetPendingExecution("FILLED",fill_price,order_ticket,deal_ticket,ActivePositionTicket,
+      ulong order_ticket=Slots[i].pendingOrderTicket;
+      Slots[i].pendingOrderTicket=0;
+      Slots[i].filledPrice=fill_price;
+      SetPendingExecution(i,"FILLED",fill_price,order_ticket,deal_ticket,Slots[i].positionTicket,
                           "PENDING_FILLED","Pending order filled by broker");
-      TryReportPendingExecution();
+      TryReportPendingExecution(i);
       return;
      }
-   if(ActivePendingOrderTicket==0 || OrderSelect(ActivePendingOrderTicket)) return;
-   if(!HistoryOrderSelect(ActivePendingOrderTicket)) return;
-   ENUM_ORDER_STATE order_state=(ENUM_ORDER_STATE)HistoryOrderGetInteger(ActivePendingOrderTicket,ORDER_STATE);
+   if(Slots[i].pendingOrderTicket==0 || OrderSelect(Slots[i].pendingOrderTicket)) return;
+   if(!HistoryOrderSelect(Slots[i].pendingOrderTicket)) return;
+   ENUM_ORDER_STATE order_state=(ENUM_ORDER_STATE)HistoryOrderGetInteger(Slots[i].pendingOrderTicket,ORDER_STATE);
    if(order_state==ORDER_STATE_FILLED || order_state==ORDER_STATE_PARTIAL) return;
    if(order_state!=ORDER_STATE_CANCELED && order_state!=ORDER_STATE_EXPIRED && order_state!=ORDER_STATE_REJECTED) return;
    string code=order_state==ORDER_STATE_EXPIRED ? "ENTRY_TIMEOUT" : "PENDING_ORDER_REMOVED";
    string description=order_state==ORDER_STATE_EXPIRED
       ? "Pending entry order expired before it was filled"
       : "Pending entry order was canceled or rejected by broker";
-   ulong order_ticket=ActivePendingOrderTicket;
-   ActivePendingOrderTicket=0;
-   SetPendingExecution("REJECTED",ActiveEntry,order_ticket,0,0,code,description);
-   TryReportPendingExecution();
+   ulong order_ticket=Slots[i].pendingOrderTicket;
+   Slots[i].pendingOrderTicket=0;
+   SetPendingExecution(i,"REJECTED",Slots[i].entry,order_ticket,0,0,code,description);
+   TryReportPendingExecution(i);
   }
 
-void PlacePendingEntry(const double market_price,const double entry_tolerance)
+void PlacePendingEntry(int i,const double market_price,const double entry_tolerance)
   {
    string symbol=SelectedBrokerSymbol();
    int digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
    double pending_price=0;
    ENUM_ORDER_TYPE pending_type=ORDER_TYPE_BUY_LIMIT;
-   if(ActiveSide=="BUY")
+   if(Slots[i].side=="BUY")
      {
-      if(market_price>ActiveEntryMax+entry_tolerance)
+      if(market_price>Slots[i].entryMax+entry_tolerance)
         {
          pending_type=ORDER_TYPE_BUY_LIMIT;
-         pending_price=ActiveEntryMax;
+         pending_price=Slots[i].entryMax;
         }
       else
         {
          pending_type=ORDER_TYPE_BUY_STOP;
-         pending_price=ActiveEntryMin;
+         pending_price=Slots[i].entryMin;
         }
      }
    else
      {
-      if(market_price<ActiveEntryMin-entry_tolerance)
+      if(market_price<Slots[i].entryMin-entry_tolerance)
         {
          pending_type=ORDER_TYPE_SELL_LIMIT;
-         pending_price=ActiveEntryMin;
+         pending_price=Slots[i].entryMin;
         }
       else
         {
          pending_type=ORDER_TYPE_SELL_STOP;
-         pending_price=ActiveEntryMax;
+         pending_price=Slots[i].entryMax;
         }
      }
    pending_price=NormalizeDouble(pending_price,digits);
-   bool valid_levels=ActiveSide=="BUY"
-      ? ActiveStopLoss<pending_price && ActiveTakeProfit>pending_price
-      : ActiveStopLoss>pending_price && ActiveTakeProfit<pending_price;
+   bool valid_levels=Slots[i].side=="BUY"
+      ? Slots[i].stopLoss<pending_price && Slots[i].takeProfit>pending_price
+      : Slots[i].stopLoss>pending_price && Slots[i].takeProfit<pending_price;
    if(!valid_levels)
      {
-      OrderAlreadySent=true;
-      SetPendingExecution("REJECTED",pending_price,0,0,0,"INVALID_PENDING_LEVELS",
+      Slots[i].orderAlreadySent=true;
+      SetPendingExecution(i,"REJECTED",pending_price,0,0,0,"INVALID_PENDING_LEVELS",
                           "SL/TP are invalid for the pending entry price");
-      TryReportPendingExecution();
+      TryReportPendingExecution(i);
       return;
      }
    datetime expiration=TimeCurrent()+MaxEntryWaitSeconds;
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
    Trade.SetTypeFillingBySymbol(symbol);
    Trade.SetDeviationInPoints(MaxSlippagePoints);
-   string comment=ActiveOrderComment();
-   OrderAlreadySent=true;
+   string comment=ActiveOrderComment(i);
+   Slots[i].orderAlreadySent=true;
    bool sent=false;
    if(pending_type==ORDER_TYPE_BUY_LIMIT)
-      sent=Trade.BuyLimit(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+      sent=Trade.BuyLimit(Slots[i].volume,pending_price,symbol,Slots[i].stopLoss,Slots[i].takeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
    else if(pending_type==ORDER_TYPE_BUY_STOP)
-      sent=Trade.BuyStop(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+      sent=Trade.BuyStop(Slots[i].volume,pending_price,symbol,Slots[i].stopLoss,Slots[i].takeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
    else if(pending_type==ORDER_TYPE_SELL_LIMIT)
-      sent=Trade.SellLimit(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+      sent=Trade.SellLimit(Slots[i].volume,pending_price,symbol,Slots[i].stopLoss,Slots[i].takeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
    else
-      sent=Trade.SellStop(ActiveVolume,pending_price,symbol,ActiveStopLoss,ActiveTakeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
+      sent=Trade.SellStop(Slots[i].volume,pending_price,symbol,Slots[i].stopLoss,Slots[i].takeProfit,ORDER_TIME_SPECIFIED,expiration,comment);
    uint retcode=Trade.ResultRetcode();
    ulong ticket=Trade.ResultOrder();
    bool placed=sent && ticket>0 && (retcode==TRADE_RETCODE_PLACED || retcode==TRADE_RETCODE_DONE);
    if(placed)
      {
-      ActiveEntry=pending_price;
-      ActivePendingOrderTicket=ticket;
+      Slots[i].entry=pending_price;
+      Slots[i].pendingOrderTicket=ticket;
       PrintFormat("Pending entry placed. signal=%s ticket=%I64u type=%d price=%.*f expiration=%s",
-                  ActiveSignalId,ticket,(int)pending_type,digits,pending_price,TimeToString(expiration,TIME_DATE|TIME_SECONDS));
+                  Slots[i].signalId,ticket,(int)pending_type,digits,pending_price,TimeToString(expiration,TIME_DATE|TIME_SECONDS));
       return;
      }
-   SetPendingExecution("REJECTED",pending_price,ticket,Trade.ResultDeal(),0,IntegerToString(retcode),Trade.ResultRetcodeDescription());
-   TryReportPendingExecution();
+   SetPendingExecution(i,"REJECTED",pending_price,ticket,Trade.ResultDeal(),0,IntegerToString(retcode),Trade.ResultRetcodeDescription());
+   TryReportPendingExecution(i);
   }
 
-void ExecuteActiveSignal(void)
+void ExecuteActiveSignal(int i)
   {
-   if(OrderAlreadySent)
+   if(Slots[i].orderAlreadySent)
      {
-      if(ActivePendingOrderTicket>0) MonitorPendingOrder();
-      else TryReportPendingExecution();
+      if(Slots[i].pendingOrderTicket>0) MonitorPendingOrder(i);
+      else TryReportPendingExecution(i);
       return;
      }
    string symbol=SelectedBrokerSymbol();
    MqlTick tick;
-   if(!SymbolInfoTick(symbol,tick)) { State=ERROR_STATE; return; }
-   double price=ActiveSide=="BUY" ? tick.ask : tick.bid;
-   if(ActiveMode=="SIMULATION")
+   if(!SymbolInfoTick(symbol,tick)) { Slots[i].state=ERROR_STATE; return; }
+   double price=Slots[i].side=="BUY" ? tick.ask : tick.bid;
+   if(Slots[i].mode=="SIMULATION")
      {
-      OrderAlreadySent=true;
-      SimulatedPosition=true;
-      ActiveEntry=price;
-      SetPendingExecution("SIMULATED_EXECUTION",price,0,0,0,"SIMULATION","SIMULATED_EXECUTION");
-      TryReportPendingExecution();
+      Slots[i].orderAlreadySent=true;
+      Slots[i].simulatedPosition=true;
+      Slots[i].entry=price;
+      Slots[i].filledPrice=price;
+      SetPendingExecution(i,"SIMULATED_EXECUTION",price,0,0,0,"SIMULATION","SIMULATED_EXECUTION");
+      TryReportPendingExecution(i);
       return;
      }
-   if(!EnableLiveTrading) { State=ERROR_STATE; return; }
+   if(!EnableLiveTrading) { Slots[i].state=ERROR_STATE; return; }
    double point=SymbolInfoDouble(symbol,SYMBOL_POINT);
    if(point<=0 || MaxEntryDeviationPoints<0 || MaxEntryWaitSeconds<1 || MaxSlippagePoints<0)
      {
-      OrderAlreadySent=true;
-      SetPendingExecution("REJECTED",price,0,0,0,"INVALID_EA_LIMITS","Invalid live entry protection settings");
-      TryReportPendingExecution();
+      Slots[i].orderAlreadySent=true;
+      SetPendingExecution(i,"REJECTED",price,0,0,0,"INVALID_EA_LIMITS","Invalid live entry protection settings");
+      TryReportPendingExecution(i);
       return;
      }
    double entryTolerance=MaxEntryDeviationPoints*point;
-   if(price<ActiveEntryMin-entryTolerance || price>ActiveEntryMax+entryTolerance)
+   if(price<Slots[i].entryMin-entryTolerance || price>Slots[i].entryMax+entryTolerance)
      {
-      PlacePendingEntry(price,entryTolerance);
+      PlacePendingEntry(i,price,entryTolerance);
       return;
      }
-   bool validAtMarket=ActiveSide=="BUY"
-      ? ActiveStopLoss<price && ActiveTakeProfit>price
-      : ActiveStopLoss>price && ActiveTakeProfit<price;
+   bool validAtMarket=Slots[i].side=="BUY"
+      ? Slots[i].stopLoss<price && Slots[i].takeProfit>price
+      : Slots[i].stopLoss>price && Slots[i].takeProfit<price;
    if(!validAtMarket)
      {
-      OrderAlreadySent=true;
-      SetPendingExecution("REJECTED",price,0,0,0,"INVALID_MARKET_LEVELS","SL/TP are invalid at the current market price");
-      TryReportPendingExecution();
+      Slots[i].orderAlreadySent=true;
+      SetPendingExecution(i,"REJECTED",price,0,0,0,"INVALID_MARKET_LEVELS","SL/TP are invalid at the current market price");
+      TryReportPendingExecution(i);
       return;
      }
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
    Trade.SetTypeFillingBySymbol(symbol);
    Trade.SetDeviationInPoints(MaxSlippagePoints);
-   string comment=ActiveOrderComment();
-   OrderAlreadySent=true;
-   bool sent=ActiveSide=="BUY"
-      ? Trade.Buy(ActiveVolume,symbol,0,ActiveStopLoss,ActiveTakeProfit,comment)
-      : Trade.Sell(ActiveVolume,symbol,0,ActiveStopLoss,ActiveTakeProfit,comment);
+   string comment=ActiveOrderComment(i);
+   Slots[i].orderAlreadySent=true;
+   bool sent=Slots[i].side=="BUY"
+      ? Trade.Buy(Slots[i].volume,symbol,0,Slots[i].stopLoss,Slots[i].takeProfit,comment)
+      : Trade.Sell(Slots[i].volume,symbol,0,Slots[i].stopLoss,Slots[i].takeProfit,comment);
    uint retcode=Trade.ResultRetcode();
    bool filled=sent && (retcode==TRADE_RETCODE_DONE || retcode==TRADE_RETCODE_DONE_PARTIAL) && PositionSelect(symbol);
    if(filled)
      {
-      ActivePositionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
+      Slots[i].positionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
       double fill=Trade.ResultPrice();
-      SetPendingExecution("FILLED",fill,Trade.ResultOrder(),Trade.ResultDeal(),ActivePositionTicket,IntegerToString(retcode),Trade.ResultRetcodeDescription());
-      TryReportPendingExecution();
+      Slots[i].filledPrice=fill;
+      SetPendingExecution(i,"FILLED",fill,Trade.ResultOrder(),Trade.ResultDeal(),Slots[i].positionTicket,IntegerToString(retcode),Trade.ResultRetcodeDescription());
+      TryReportPendingExecution(i);
      }
    else
      {
-      SetPendingExecution("REJECTED",price,Trade.ResultOrder(),Trade.ResultDeal(),0,IntegerToString(retcode),Trade.ResultRetcodeDescription());
-      TryReportPendingExecution();
+      SetPendingExecution(i,"REJECTED",price,Trade.ResultOrder(),Trade.ResultDeal(),0,IntegerToString(retcode),Trade.ResultRetcodeDescription());
+      TryReportPendingExecution(i);
      }
   }
 
-bool ReportClose(const double close_price,const double profit,const string reason)
+bool ReportClose(int i,const double close_price,const double profit,const string reason)
   {
    string closed=TimeToString(TimeGMT(),TIME_DATE|TIME_SECONDS);
    StringReplace(closed,".","-"); StringReplace(closed," ","T"); closed+="Z";
-   string body="{\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(AssignmentToken)+"\",";
+   string body="{\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(Slots[i].assignmentToken)+"\",";
    body+="\"closePrice\":\""+DoubleToString(close_price,8)+"\",\"grossProfit\":\""+DoubleToString(profit,2)+"\",";
    body+="\"commission\":\"0\",\"swap\":\"0\",\"netProfit\":\""+DoubleToString(profit,2)+"\",";
    body+="\"closeReason\":\""+JsonEscape(reason)+"\",\"closedAt\":\""+closed+"\"}";
    string response;
-   int status=Http.Request("POST","/api/trades/"+ActiveSignalId+"/closed",body,ActiveSignalId+"-close-request",ActiveSignalId+"-closed",response);
+   int status=Http.Request("POST","/api/trades/"+Slots[i].signalId+"/closed",body,Slots[i].signalId+"-close-request",Slots[i].signalId+"-closed",response);
    return status>=200 && status<300;
   }
 
-void MonitorPosition(void)
+// Cuando la pierna TP1 (legIndex 0) cierra por take-profit, mueve el SL de las piernas hermanas
+// (mismo groupId, legIndex>0, aún abiertas) al precio de llenado real, es decir, a breakeven.
+void MoveSiblingsToBreakeven(int i)
+  {
+   for(int j=0;j<MAX_SLOTS;j++)
+     {
+      if(j==i || !Slots[j].used) continue;
+      if(Slots[j].groupId!=Slots[i].groupId || Slots[j].legIndex==0) continue;
+      if(Slots[j].simulatedPosition)
+        {
+         Slots[j].stopLoss=Slots[j].filledPrice;
+         continue;
+        }
+      if(Slots[j].positionTicket==0 || !PositionSelectByTicket(Slots[j].positionTicket)) continue;
+      double currentTp=PositionGetDouble(POSITION_TP);
+      if(Trade.PositionModify(Slots[j].positionTicket,Slots[j].filledPrice,currentTp))
+        {
+         Slots[j].stopLoss=Slots[j].filledPrice;
+         ReportSlUpdate(j,Slots[j].filledPrice,"BREAKEVEN_TP1");
+        }
+      else
+         PrintFormat("No fue posible mover SL a breakeven. signal=%s error=%d",Slots[j].signalId,GetLastError());
+     }
+  }
+
+void MonitorPosition(int i)
   {
    string symbol=SelectedBrokerSymbol();
    MqlTick tick;
    if(!SymbolInfoTick(symbol,tick)) return;
-   if(SimulatedPosition)
+   if(Slots[i].simulatedPosition)
      {
-      double price=ActiveSide=="BUY" ? tick.bid : tick.ask;
-      bool hitSl=(ActiveSide=="BUY" && price<=ActiveStopLoss) || (ActiveSide=="SELL" && price>=ActiveStopLoss);
-      bool hitTp=(ActiveSide=="BUY" && price>=ActiveTakeProfit) || (ActiveSide=="SELL" && price<=ActiveTakeProfit);
+      double price=Slots[i].side=="BUY" ? tick.bid : tick.ask;
+      bool hitSl=(Slots[i].side=="BUY" && price<=Slots[i].stopLoss) || (Slots[i].side=="SELL" && price>=Slots[i].stopLoss);
+      bool hitTp=(Slots[i].side=="BUY" && price>=Slots[i].takeProfit) || (Slots[i].side=="SELL" && price<=Slots[i].takeProfit);
       if(!hitSl && !hitTp) return;
       double profit=0;
-      ENUM_ORDER_TYPE orderType=ActiveSide=="BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      if(!OrderCalcProfit(orderType,symbol,ActiveVolume,ActiveEntry,price,profit))
+      ENUM_ORDER_TYPE orderType=Slots[i].side=="BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      if(!OrderCalcProfit(orderType,symbol,Slots[i].volume,Slots[i].entry,price,profit))
          PrintFormat("No fue posible calcular P&L simulado. error=%d",GetLastError());
-      State=REPORTING_CLOSE;
-      if(ReportClose(price,profit,hitSl ? "SIMULATED_SL" : "SIMULATED_TP")) { ResetActive(); State=IDLE; }
+      Slots[i].state=REPORTING_CLOSE;
+      if(ReportClose(i,price,profit,hitSl ? "SIMULATED_SL" : "SIMULATED_TP"))
+        {
+         if(hitTp && Slots[i].legIndex==0) MoveSiblingsToBreakeven(i);
+         ResetSlot(i);
+        }
       return;
      }
-   bool open=ActivePositionTicket>0 && PositionSelectByTicket(ActivePositionTicket);
+   bool open=Slots[i].positionTicket>0 && PositionSelectByTicket(Slots[i].positionTicket);
    if(open) return;
    HistorySelect(TimeCurrent()-86400*7,TimeCurrent());
    double closePrice=0,profit=0,commission=0,swap=0;
-   for(int i=HistoryDealsTotal()-1;i>=0;i--)
+   bool closedByTp=false;
+   for(int j=HistoryDealsTotal()-1;j>=0;j--)
      {
-      ulong ticket=HistoryDealGetTicket(i);
-      if((ulong)HistoryDealGetInteger(ticket,DEAL_POSITION_ID)!=ActivePositionTicket) continue;
+      ulong ticket=HistoryDealGetTicket(j);
+      if((ulong)HistoryDealGetInteger(ticket,DEAL_POSITION_ID)!=Slots[i].positionTicket) continue;
       if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY)==DEAL_ENTRY_OUT)
         {
          closePrice=HistoryDealGetDouble(ticket,DEAL_PRICE);
          profit+=HistoryDealGetDouble(ticket,DEAL_PROFIT);
          commission+=HistoryDealGetDouble(ticket,DEAL_COMMISSION);
          swap+=HistoryDealGetDouble(ticket,DEAL_SWAP);
+         if((ENUM_DEAL_REASON)HistoryDealGetInteger(ticket,DEAL_REASON)==DEAL_REASON_TP) closedByTp=true;
         }
      }
-   State=REPORTING_CLOSE;
-   if(ReportClose(closePrice,profit+commission+swap,"BROKER_CLOSED")) { ResetActive(); State=IDLE; }
-  }
-
-void ResetActive(void)
-  {
-   SimulatedPosition=false; OrderAlreadySent=false; ActiveSignalId=""; ActiveTradeId=""; AssignmentToken="";
-   ActiveMode="SIMULATION"; ActiveSymbol=""; ActiveSide=""; ActiveEntry=0; ActiveEntryMin=0; ActiveEntryMax=0;
-   ActiveStopLoss=0; ActiveTakeProfit=0;
-   ActiveVolume=0; ActivePositionTicket=0; ActivePendingOrderTicket=0;
-   ActiveEntryWaitStarted=0;
-   PendingExecutionResult=""; PendingExecutionPrice=0; PendingOrderTicket=0; PendingDealTicket=0; PendingPositionTicket=0;
-   PendingRetcode=""; PendingDescription="";
+   Slots[i].state=REPORTING_CLOSE;
+   if(ReportClose(i,closePrice,profit+commission+swap,"BROKER_CLOSED"))
+     {
+      if(closedByTp && Slots[i].legIndex==0) MoveSiblingsToBreakeven(i);
+      ResetSlot(i);
+     }
   }
 
 void RecoverCurrentTrade(void)
   {
    string response;
    int status=Http.Request("GET","/api/trades/current?clientId="+ClientId,"",NewRequestId("current"),"",response);
-   if(status<200 || status>=300 || !JsonBool(response,"hasTrade",false)) { State=IDLE; return; }
-   if(!ParseAssignment(response) || !BasicSignalCheck()) { State=ERROR_STATE; return; }
-   string tradeStatus=JsonString(response,"status","");
-   if(tradeStatus=="ASSIGNED")
+   if(status<200 || status>=300 || !JsonBool(response,"hasTrade",false)) return;
+   string items[];
+   if(!JsonArrayObjects(response,"trades",items)) return;
+   for(int k=0;k<ArraySize(items);k++)
      {
-      if(RecoverPendingOrder()) { State=EXECUTING; return; }
-      double fill_price=0;
-      ulong deal_ticket=0;
-      if(SelectActivePosition(fill_price,deal_ticket))
+      int i=FindFreeSlot();
+      if(i<0) { Print("No hay slots libres para recuperar todos los trades activos."); break; }
+      if(!ParseAssignment(items[k],i) || !BasicSignalCheck(i)) { ResetSlot(i); continue; }
+      Slots[i].used=true;
+      string tradeStatus=JsonString(items[k],"status","");
+      if(tradeStatus=="ASSIGNED")
         {
-         OrderAlreadySent=true;
-         SetPendingExecution("FILLED",fill_price,0,deal_ticket,ActivePositionTicket,
-                             "RECOVERED_FILL","Recovered a filled pending order");
-        }
-      State=EXECUTING;
-      return;
-     }
-   if(tradeStatus=="FILLED")
-     {
-      OrderAlreadySent=true;
-      if(ActiveMode=="SIMULATION") SimulatedPosition=true;
-      else
-        {
+         if(RecoverPendingOrder(i)) { Slots[i].state=EXECUTING; continue; }
          double fill_price=0;
          ulong deal_ticket=0;
-         if(!SelectActivePosition(fill_price,deal_ticket) && PositionSelect(SelectedBrokerSymbol()))
-            ActivePositionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
+         if(SelectActivePosition(i,fill_price,deal_ticket))
+           {
+            Slots[i].orderAlreadySent=true;
+            Slots[i].filledPrice=fill_price;
+            SetPendingExecution(i,"FILLED",fill_price,0,deal_ticket,Slots[i].positionTicket,
+                                "RECOVERED_FILL","Recovered a filled pending order");
+           }
+         Slots[i].state=EXECUTING;
+         continue;
         }
-      if(ActiveMode=="LIVE" && ActivePositionTicket==0) { State=ERROR_STATE; return; }
-      State=POSITION_OPEN;
-      return;
+      if(tradeStatus=="FILLED")
+        {
+         Slots[i].orderAlreadySent=true;
+         if(Slots[i].mode=="SIMULATION") { Slots[i].simulatedPosition=true; Slots[i].filledPrice=Slots[i].entry; }
+         else
+           {
+            double fill_price=0;
+            ulong deal_ticket=0;
+            if(!SelectActivePosition(i,fill_price,deal_ticket) && PositionSelect(SelectedBrokerSymbol()))
+               Slots[i].positionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
+            Slots[i].filledPrice=fill_price>0 ? fill_price : PositionGetDouble(POSITION_PRICE_OPEN);
+           }
+         if(Slots[i].mode=="LIVE" && Slots[i].positionTicket==0) { Slots[i].state=ERROR_STATE; continue; }
+         Slots[i].state=POSITION_OPEN;
+         continue;
+        }
+      Slots[i].state=ERROR_STATE;
      }
-   State=ERROR_STATE;
   }
 
+// Agota todos los slots libres en el mismo tick (en vez de uno por ciclo de polling), para que
+// las piernas hermanas de una misma señal (TP1/TP2/TP3...) queden asignadas casi al mismo tiempo
+// en lugar de escalonadas por varios PollIntervalSeconds.
 void CheckNext(void)
   {
-   if(PositionsTotal()>0) return;
-   State=CHECKING_SIGNAL;
-   string response;
-   int status=Http.Request("GET","/api/trades/next?clientId="+ClientId,"",NewRequestId("next"),"",response);
-   if(status<200 || status>=300) { State=IDLE; return; }
-   if(!JsonBool(response,"hasSignal",false)) { State=IDLE; return; }
-   if(!ParseAssignment(response) || !BasicSignalCheck() || !AcknowledgeAssignment()) { State=ERROR_STATE; return; }
-   State=EXECUTING;
-   ExecuteActiveSignal();
+   while(true)
+     {
+      int i=FindFreeSlot();
+      if(i<0) return;
+      string response;
+      int status=Http.Request("GET","/api/trades/next?clientId="+ClientId,"",NewRequestId("next",i),"",response);
+      if(status<200 || status>=300) return;
+      if(!JsonBool(response,"hasSignal",false)) return;
+      if(!ParseAssignment(response,i) || !BasicSignalCheck(i) || !AcknowledgeAssignment(i)) continue;
+      Slots[i].used=true;
+      Slots[i].state=EXECUTING;
+      ExecuteActiveSignal(i);
+     }
   }
 
 int OnInit(void)
   {
    if(ApiKey=="" || ClientId=="" || PollIntervalSeconds<1) return INIT_PARAMETERS_INCORRECT;
-   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d accountMode=%d",
+   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d accountMode=%d maxSlots=%d",
                EnableLiveTrading ? "true" : "false",RequireDemoAccountForLive ? "true" : "false",
-               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,(int)AccountInfoInteger(ACCOUNT_TRADE_MODE));
+               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,(int)AccountInfoInteger(ACCOUNT_TRADE_MODE),MAX_SLOTS);
+   for(int i=0;i<MAX_SLOTS;i++) ResetSlot(i);
    Http.Configure(ApiUrl,ApiKey,HttpTimeoutMs);
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
    Trade.SetDeviationInPoints(MaxSlippagePoints);
@@ -563,9 +656,15 @@ void OnTimer(void)
   {
    if(Busy) return;
    Busy=true;
-   if(TimeCurrent()-LastContextSent>=60 && State!=EXECUTING) PostContext();
-   if(State==POSITION_OPEN || State==REPORTING_CLOSE) MonitorPosition();
-   else if(State==EXECUTING) ExecuteActiveSignal();
-   else if(State==IDLE) CheckNext();
+   bool anyExecuting=false;
+   for(int i=0;i<MAX_SLOTS;i++) if(Slots[i].used && Slots[i].state==EXECUTING) anyExecuting=true;
+   if(TimeCurrent()-LastContextSent>=60 && !anyExecuting) PostContext();
+   for(int i=0;i<MAX_SLOTS;i++)
+     {
+      if(!Slots[i].used) continue;
+      if(Slots[i].state==POSITION_OPEN || Slots[i].state==REPORTING_CLOSE) MonitorPosition(i);
+      else if(Slots[i].state==EXECUTING) ExecuteActiveSignal(i);
+     }
+   CheckNext();
    Busy=false;
   }

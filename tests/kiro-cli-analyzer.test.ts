@@ -27,7 +27,7 @@ describe("extractJsonFromKiroOutput", () => {
 
 describe("parseKiroOutput", () => {
   it("valida contra el schema de señal cuando el JSON es correcto", () => {
-    const raw = '{"isSignal":true,"symbol":"XAUUSD","side":"BUY","entry":3345,"stopLoss":3335,"takeProfit":3370,"confidence":0.9}';
+    const raw = '{"isSignal":true,"symbol":"XAUUSD","side":"BUY","entry":3345,"stopLoss":3335,"takeProfits":[3370],"confidence":0.9}';
     expect(parseKiroOutput(raw)).toMatchObject({ isSignal: true, symbol: "XAUUSD", entry: "3345" });
   });
 

@@ -18,6 +18,7 @@ export type EventName =
   | "ORDER_FILLED"
   | "ORDER_REJECTED"
   | "POSITION_CLOSED"
+  | "SL_UPDATED"
   | "SYSTEM_ERROR";
 
 export function createLogger(config: Pick<AppConfig, "logLevel">): Logger {

@@ -39,7 +39,7 @@ describe("PrefilteredSignalAnalyzer", () => {
 
   it("delega al analizador interno cuando el mensaje parece una señal", async () => {
     const expected = { isSignal: true as const, symbol: "XAUUSD", side: "BUY" as const, entry: "3345",
-      entryMin: "3345", entryMax: "3345", stopLoss: "3335", takeProfit: "3370", confidence: 0.98 };
+      entryMin: "3345", entryMax: "3345", stopLoss: "3335", takeProfits: ["3370"], confidence: 0.98 };
     const inner: SignalAnalyzer = { analyze: async () => expected };
     const prefilter = new PrefilteredSignalAnalyzer(inner, logger);
     const result = await prefilter.analyze({ ...message, text: "BUY XAUUSD ENTRY=3345 SL=3335 TP=3370" }, "SIG-2");

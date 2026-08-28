@@ -19,7 +19,7 @@ describe("API REST e integración local", () => {
   let app: Awaited<ReturnType<typeof buildServer>>;
   let pipeline: SignalPipeline;
   const analyzer: SignalAnalyzer = { async analyze() { return { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "100",
-    entryMin: "100", entryMax: "101", stopLoss: "99", takeProfit: "102", lot: "0.1", confidence: 0.99 }; } };
+    entryMin: "100", entryMax: "101", stopLoss: "99", takeProfits: ["102"], lot: "0.1", confidence: 0.99 }; } };
 
   beforeEach(async () => {
     db = openDatabase(":memory:"); repo = new SqliteRepositories(db);
@@ -63,7 +63,7 @@ describe("API REST e integración local", () => {
     const second = repo.createFromTelegram({ chatId: "-100", messageId: "2", timestamp: new Date().toISOString(),
       text: "BUY XAUUSD 101", chatName: "Signals", source: "TELEGRAM" }, new Date(Date.now() + 60_000).toISOString())!;
     repo.saveAnalysis(second.id, { isSignal: true, symbol: "XAUUSD", side: "BUY", entry: "101", entryMin: "101", entryMax: "101", stopLoss: "100",
-      takeProfit: "103", lot: "0.1", confidence: 0.99 });
+      takeProfits: ["103"], lot: "0.1", confidence: 0.99 });
     repo.setStatus(second.id, "ANALYZING");
     repo.saveValidated(second.id, "0.1", "{}");
     repo.setStatus(second.id, "VALIDATED");
