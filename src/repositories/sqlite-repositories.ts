@@ -116,7 +116,10 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
         symbol,side,entry,entry_min,entry_max,stop_loss,take_profit,requested_lot,risk_percentage,confidence,
         received_at,expires_at,status,created_at,updated_at,signal_group_id,leg_index,leg_count
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        id, parent.telegramChatId, parent.telegramMessageId, parent.source, parent.chatName, parent.originalMessage, parent.aiResultJson,
+        // Sibling legs share the same Telegram message, but the legacy schema enforces
+        // uniqueness on (source, chat, message). Derive a stable per-leg message key while
+        // retaining the original message text and signal_group_id for traceability.
+        id, parent.telegramChatId, `${parent.telegramMessageId}-TP${legIndex + 1}`, parent.source, parent.chatName, parent.originalMessage, parent.aiResultJson,
         parent.symbol, parent.side, parent.entry, parent.entryMin, parent.entryMax, parent.stopLoss, takeProfit,
         parent.requestedLot, parent.riskPercentage, parent.confidence,
         parent.receivedAt, parent.expiresAt, "ANALYZING", timestamp, timestamp, groupId, legIndex, legCount);

@@ -656,9 +656,9 @@ void OnTimer(void)
   {
    if(Busy) return;
    Busy=true;
-   bool anyExecuting=false;
-   for(int i=0;i<MAX_SLOTS;i++) if(Slots[i].used && Slots[i].state==EXECUTING) anyExecuting=true;
-   if(TimeCurrent()-LastContextSent>=60 && !anyExecuting) PostContext();
+   // Keep the broker context fresh even while entries are executing. The server
+   // requires a recent context before assigning additional queued signals.
+   if(TimeCurrent()-LastContextSent>=60) PostContext();
    for(int i=0;i<MAX_SLOTS;i++)
      {
       if(!Slots[i].used) continue;
