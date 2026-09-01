@@ -396,3 +396,14 @@ El CLI escribió texto adicional, Markdown o JSON que no cumple el esquema. Debe
 ### El EA no pide otra señal
 
 Es intencional si existe una posición, asignación o ejecución incierta. Resuelva primero el trade activo; no cambie manualmente una señal a `QUEUED`.
+
+## Configuración del despliegue LIVE
+
+La configuración operativa actual utiliza:
+
+- `TRADING_MODE=LIVE` con confirmación explícita.
+- `MAX_SIMULTANEOUS_TRADES=10` operaciones simultáneas.
+- `MAX_DAILY_TRADES=99` operaciones por día.
+- `DEFAULT_FIXED_LOT=0.1` para nuevas señales sin lote solicitado.
+
+Para que MT5 reciba asignaciones, agrega `http://127.0.0.1:3000` a la lista de WebRequest permitidas en **Herramientas → Opciones → Asesores Expertos**. El EA publica el contexto de cuenta y símbolo cada 60 segundos incluso con operaciones activas; si el contexto está ausente o vencido, una señal permanece en `VALIDATED` y no pasa a `QUEUED`.
