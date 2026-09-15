@@ -32,6 +32,8 @@ input bool RequireDemoAccountForLive=true;
 input int MaxEntryDeviationPoints=50;
 input int MaxEntryWaitSeconds=900;
 input int MaxSlippagePoints=20;
+input bool EnableTrendFilter=true;
+input double TrendEmaBufferPct=0.2;
 
 // Cada slot representa una entrada activa (asignada por el servidor) hasta que se cierra o se
 // rechaza. La capacidad del EA es fija (MAX_SLOTS); el límite real de entradas simultáneas lo
@@ -75,6 +77,7 @@ CTelegramTraderHttp Http;
 CTrade Trade;
 bool Busy=false;
 datetime LastContextSent=0;
+int TrendEma40M5Handle=INVALID_HANDLE;
 
 int FindFreeSlot(void)
   {
@@ -105,6 +108,49 @@ string NewRequestId(const string action,const int slot=-1)
 string SelectedBrokerSymbol(void)
   {
    return BrokerSymbol=="" ? _Symbol : BrokerSymbol;
+  }
+
+double GetTrendEMA40M5(void)
+  {
+   if(TrendEma40M5Handle==INVALID_HANDLE) return 0.0;
+   double emaBuffer[];
+   ArraySetAsSeries(emaBuffer,true);
+   if(CopyBuffer(TrendEma40M5Handle,0,0,1,emaBuffer)<=0) return 0.0;
+   return emaBuffer[0];
+  }
+
+// Replicates the trend rule from Change_of_Direction_MultiPattern_Continuo:
+// EMA40 is calculated on M5 and compared with the previous closed candle on
+// the chart timeframe. The percentage around the EMA is a neutral zone.
+bool IsSignalTrendAllowed(int i,double &referencePrice,double &ema40,double &zoneBoundary)
+  {
+   referencePrice=0.0;
+   ema40=0.0;
+   zoneBoundary=0.0;
+   if(!EnableTrendFilter) return true;
+
+   string symbol=SelectedBrokerSymbol();
+   referencePrice=iClose(symbol,_Period,1);
+   ema40=GetTrendEMA40M5();
+
+   // Preserve the source strategy's fail-open behavior while history or the
+   // indicator buffer is still loading.
+   if(referencePrice<=0.0 || ema40<=0.0)
+     {
+      PrintFormat("Trend filter has no data yet; allowing signal=%s side=%s price=%.8f ema40=%.8f",
+                  Slots[i].signalId,Slots[i].side,referencePrice,ema40);
+      return true;
+     }
+
+   double upperZone=ema40*(1.0+TrendEmaBufferPct/100.0);
+   double lowerZone=ema40*(1.0-TrendEmaBufferPct/100.0);
+   zoneBoundary=Slots[i].side=="BUY" ? upperZone : lowerZone;
+
+   bool allowed=Slots[i].side=="BUY" ? referencePrice>upperZone : referencePrice<lowerZone;
+   PrintFormat("Trend filter signal=%s side=%s allowed=%s price=%.8f ema40=%.8f lower=%.8f upper=%.8f timeframe=%s",
+               Slots[i].signalId,Slots[i].side,allowed ? "true" : "false",referencePrice,ema40,
+               lowerZone,upperZone,EnumToString(_Period));
+   return allowed;
   }
 
 bool PostContext(void)
@@ -434,6 +480,18 @@ void ExecuteActiveSignal(int i)
    MqlTick tick;
    if(!SymbolInfoTick(symbol,tick)) { Slots[i].state=ERROR_STATE; return; }
    double price=Slots[i].side=="BUY" ? tick.ask : tick.bid;
+   double trendPrice=0.0;
+   double trendEma40=0.0;
+   double trendBoundary=0.0;
+   if(!IsSignalTrendAllowed(i,trendPrice,trendEma40,trendBoundary))
+     {
+      Slots[i].orderAlreadySent=true;
+      string description=StringFormat("%s blocked by EMA40 M5 trend filter: candle close %.8f, boundary %.8f, EMA %.8f",
+                                      Slots[i].side,trendPrice,trendBoundary,trendEma40);
+      SetPendingExecution(i,"REJECTED",price,0,0,0,"TREND_FILTER_BLOCKED",description);
+      TryReportPendingExecution(i);
+      return;
+     }
    if(Slots[i].mode=="SIMULATION")
      {
       Slots[i].orderAlreadySent=true;
@@ -661,10 +719,22 @@ void CheckNext(void)
 
 int OnInit(void)
   {
-   if(ApiKey=="" || ClientId=="" || PollIntervalSeconds<1) return INIT_PARAMETERS_INCORRECT;
-   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d accountMode=%d maxSlots=%d",
+   if(ApiKey=="" || ClientId=="" || PollIntervalSeconds<1 || TrendEmaBufferPct<0.0) return INIT_PARAMETERS_INCORRECT;
+   string symbol=SelectedBrokerSymbol();
+   if(!SymbolSelect(symbol,true)) return INIT_FAILED;
+   if(EnableTrendFilter)
+     {
+      TrendEma40M5Handle=iMA(symbol,PERIOD_M5,40,0,MODE_EMA,PRICE_CLOSE);
+      if(TrendEma40M5Handle==INVALID_HANDLE)
+         PrintFormat("WARNING: Failed to create EMA40 M5 trend filter for %s. Signals will be allowed until data is available.",symbol);
+      else
+         PrintFormat("EMA40 M5 trend filter initialized. symbol=%s bufferPct=%.4f priceTimeframe=%s",
+                     symbol,TrendEmaBufferPct,EnumToString(_Period));
+     }
+   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d trendFilter=%s trendBufferPct=%.4f accountMode=%d maxSlots=%d",
                EnableLiveTrading ? "true" : "false",RequireDemoAccountForLive ? "true" : "false",
-               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,(int)AccountInfoInteger(ACCOUNT_TRADE_MODE),MAX_SLOTS);
+               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,EnableTrendFilter ? "true" : "false",
+               TrendEmaBufferPct,(int)AccountInfoInteger(ACCOUNT_TRADE_MODE),MAX_SLOTS);
    for(int i=0;i<MAX_SLOTS;i++) ResetSlot(i);
    Http.Configure(ApiUrl,ApiKey,HttpTimeoutMs);
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
@@ -678,6 +748,11 @@ int OnInit(void)
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   if(TrendEma40M5Handle!=INVALID_HANDLE)
+     {
+      IndicatorRelease(TrendEma40M5Handle);
+      TrendEma40M5Handle=INVALID_HANDLE;
+     }
   }
 
 void OnTimer(void)
