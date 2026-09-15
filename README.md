@@ -2,7 +2,7 @@
 
 MVP local para convertir mensajes de Telegram recibidos mediante una cuenta de usuario/MTProto en señales estructuradas, validarlas, aplicar límites de riesgo y entregarlas por REST a un Expert Advisor de MetaTrader 5.
 
-El proyecto inicia siempre en `SIMULATION`. El agente de IA interpreta texto, pero no tiene acceso al broker ni autoridad para ejecutar operaciones.
+El proyecto inicia en `SIMULATION` por defecto. El agente de IA interpreta texto, pero no tiene acceso al broker ni autoridad para ejecutar operaciones.
 
 ## Estado y alcance
 
@@ -12,11 +12,11 @@ El proyecto inicia siempre en `SIMULATION`. El agente de IA interpreta texto, pe
 - SQLite transaccional; no se usan archivos planos como cola o transporte.
 - Validación técnica y RiskEngine independiente.
 - API REST autenticada e idempotente.
-- EA MQL5 con una sola operación activa.
+- EA MQL5 con hasta 10 slots locales y límite simultáneo controlado por el servidor.
 - Ejecución simulada con precios recibidos por MT5.
 - LIVE deshabilitado por defecto y protegido por confirmaciones múltiples.
 
-El EA espera a que el precio de mercado esté dentro de `MaxEntryDeviationPoints` respecto de `entry` antes de ejecutar. Si no llega en `MaxEntryWaitSeconds`, rechaza la operación. La ejecución final sigue siendo una orden de mercado y puede tener un deslizamiento máximo configurado por `MaxSlippagePoints`; las órdenes limit/stop quedan fuera de esta versión.
+El EA ejecuta a mercado cuando el precio está dentro de la zona permitida. Si está fuera, coloca una orden pendiente `limit` o `stop` con expiración en `MaxEntryWaitSeconds`. El deslizamiento máximo se configura con `MaxSlippagePoints`. Cada fill se vincula con su posición mediante `DEAL_POSITION_ID`, evitando confundir tickets cuando existen varias posiciones del mismo símbolo en cuentas hedging.
 
 ## Arquitectura
 
@@ -42,6 +42,12 @@ Responsabilidades:
 - Node.js: persiste, audita y asigna señales.
 - EA: ejecuta o simula y reporta el resultado.
 - Broker: confirma o rechaza la operación real.
+
+Documentación complementaria:
+
+- [Estructura del proyecto](./docs/ESTRUCTURA_DEL_PROYECTO.md).
+- [Contexto funcional actual](./docs/CONTEXTO_FUNCIONAL_ACTUAL.md).
+- [Arquitectura y decisiones operativas](./docs/architecture.md).
 
 ## Requisitos
 
@@ -114,9 +120,10 @@ Node envía por `stdin` un objeto JSON con instrucciones, esquema, `signalId` y 
   "isSignal": true,
   "symbol": "XAUUSD",
   "side": "BUY",
-  "entry": 3345,
+  "entryMin": 3344,
+  "entryMax": 3346,
   "stopLoss": 3335,
-  "takeProfit": 3370,
+  "takeProfits": [3355, 3370, 3390],
   "riskPercentage": 1,
   "confidence": 0.98
 }
@@ -212,8 +219,10 @@ Idempotency-Key: <stable retry key>     # POST
 | GET | `/api/trades/next?clientId=...` | Reserva atómica de siguiente señal |
 | GET | `/api/trades/current?clientId=...` | Recuperación de asignación activa |
 | POST | `/api/trades/:signalId/assigned` | Acuse de asignación |
+| POST | `/api/trades/:signalId/cancel` | Cancelación administrativa antes del fill |
 | POST | `/api/trades/:signalId/execution` | Fill, simulación, rechazo o resultado incierto |
 | POST | `/api/trades/:signalId/closed` | Cierre y P&L |
+| POST | `/api/trades/:signalId/sl-updated` | Actualización de SL, incluido breakeven de piernas hermanas |
 | GET | `/api/trades/:signalId` | Estado del trade |
 | GET | `/api/signals` | Lista paginada y filtrable |
 | GET | `/api/signals/:signalId` | Detalle de señal |
@@ -282,7 +291,7 @@ IDLE -> CHECKING_SIGNAL -> EXECUTING -> POSITION_OPEN -> REPORTING_CLOSE -> IDLE
                               +------------- ERROR --------------+
 ```
 
-Mientras está en `POSITION_OPEN` no llama a `/api/trades/next`. En el MVP, si existe cualquier posición en la cuenta, tampoco solicita otra señal.
+El EA consulta `/api/trades/next` mientras tenga slots libres. El servidor aplica `MAX_SIMULTANEOUS_TRADES` por cliente. Al reiniciar, `/api/trades/current` permite recuperar asignaciones, órdenes pendientes y posiciones abiertas. Cuando TP1 cierra por take-profit, el EA mueve las piernas posteriores del mismo grupo a breakeven y reporta el nuevo SL.
 
 ## Simulation Mode
 
@@ -326,7 +335,9 @@ SQLite se crea automáticamente en `DATABASE_URL`, con:
 - WAL para base persistente.
 - Busy timeout.
 - Migraciones versionadas.
-- Tablas `signals`, `signal_status_history`, `trades`, `executions`, `positions`, `mt5_clients`, `errors`, `system_events` e `idempotency_records`.
+- Tablas `signals`, `signal_status_history`, `trades`, `executions`, `positions`, `mt5_clients`, `mt5_deal_history`, `errors`, `system_events` e `idempotency_records`.
+
+`mt5_deal_history` es un ledger inmutable para importar el historial exacto del broker sin perder operaciones duplicadas históricas que compartan una misma señal.
 
 La lógica de negocio accede mediante repositorios; cambiar a PostgreSQL no requiere modificar casos de uso.
 
@@ -352,7 +363,11 @@ Las pruebas cubren JSON del agente, BUY/SELL, SL/TP inválidos, símbolo, expira
 - Texto Telegram nunca se ejecuta ni se concatena al shell.
 - LIVE bloqueado por defecto.
 - Cuenta LIVE opcionalmente restringida por ID.
-- Una sola operación activa en servidor y EA.
+- Límite simultáneo configurable en el servidor y capacidad fija de 10 slots en el EA.
+
+## Dependencias y auditoría
+
+Las dependencias de producción se revisan con `npm audit`. La actualización de septiembre de 2026 elevó Fastify a `5.12.4` y corrigió las versiones vulnerables de `fast-uri` (`3.1.8` y `4.1.5`). Las alertas restantes corresponden a Vitest, una dependencia exclusiva de desarrollo, y requieren un salto mayor antes de poder corregirse.
 
 Para exponer la API fuera del equipo local es obligatorio añadir TLS, rotación de secretos y controles de red.
 
