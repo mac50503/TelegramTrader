@@ -112,6 +112,14 @@ export async function buildServer(
       return { trade };
     }));
 
+  app.post<{ Params: { signalId: string } }>("/api/trades/:signalId/cancel", async (request, reply) =>
+    idempotent(request, reply, repositories, `cancel:${request.params.signalId}`, () => {
+      const body = clientQuerySchema.parse(request.body);
+      const trade = repositories.cancel(request.params.signalId, body.clientId);
+      repositories.recordEvent("TRADE_CANCELED", { signalId: request.params.signalId, tradeId: trade.id, source: "ADMIN", status: "CANCELED" });
+      return { trade };
+    }));
+
   app.post<{ Params: { signalId: string } }>("/api/trades/:signalId/execution", async (request, reply) =>
     idempotent(request, reply, repositories, `execution:${request.params.signalId}`, () => {
       const body = executionSchema.parse(request.body);
@@ -145,7 +153,7 @@ export async function buildServer(
   app.get<{ Params: { signalId: string } }>("/api/trades/:signalId", async (request) => {
     const trade = repositories.findTradeBySignalId(request.params.signalId);
     if (!trade) throw new NotFoundError("Trade");
-    return { trade };
+    return { trade, status: trade.status };
   });
 
   app.get("/api/signals", async (request) => {

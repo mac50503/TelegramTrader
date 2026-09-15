@@ -190,6 +190,17 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
     return this.requiredTrade(signalId);
   }
 
+  cancel(signalId: string, clientId: string): Trade {
+    const trade = this.requiredTrade(signalId);
+    if (trade.clientId !== clientId) throw new ConflictError("INVALID_ASSIGNMENT", "Trade does not belong to this client");
+    if (!["ASSIGNED", "SUBMITTED"].includes(trade.status)) throw new ConflictError("TRADE_NOT_CANCELABLE", "Only unfilled trades can be canceled");
+    const timestamp = now();
+    this.db.prepare("UPDATE trades SET status='CANCELED',updated_at=?,version=version+1 WHERE signal_id=? AND client_id=? AND status IN ('ASSIGNED','SUBMITTED')")
+      .run(timestamp, signalId, clientId);
+    this.setStatus(signalId, "REJECTED", { code: "ADMIN_CANCELED", message: "Canceled administratively before execution" });
+    return this.requiredTrade(signalId);
+  }
+
   recordExecution(input: RecordExecutionInput): Trade {
     return this.db.transaction(() => {
       const existing = this.db.prepare("SELECT trade_id FROM executions WHERE id=? OR request_id=?").get(input.executionId, input.requestId) as { trade_id: string } | undefined;
@@ -261,7 +272,7 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
 
   realizedDailyLoss(dayStart: string, mode: TradingMode): string {
     const rows = this.db.prepare(`SELECT p.net_profit FROM positions p JOIN trades t ON t.id=p.trade_id
-      WHERE p.status='CLOSED' AND p.closed_at>=? AND t.trading_mode=?`).all(dayStart, mode) as { net_profit: string }[];
+      WHERE p.status='CLOSED' AND p.closed_at>=? AND t.trading_mode=? AND COALESCE(p.close_reason,'')<>'ADMIN_REVIEW'`).all(dayStart, mode) as { net_profit: string }[];
     const total = rows.reduce((sum, row) => Decimal.min(new Decimal(row.net_profit), 0).abs().plus(sum), new Decimal(0));
     return total.toString();
   }

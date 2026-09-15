@@ -25,6 +25,7 @@ export interface TradeRepository {
   assignNext(clientId: string, mode: "SIMULATION" | "LIVE", maxSimultaneousTrades: number): TradeAssignment | null;
   currentAssignments(clientId: string): TradeAssignment[];
   acknowledge(signalId: string, clientId: string, assignmentToken: string): Trade;
+  cancel(signalId: string, clientId: string): Trade;
   recordExecution(input: RecordExecutionInput): Trade;
   recordClose(input: RecordCloseInput): Trade;
   recordSlUpdate(input: RecordSlUpdateInput): Trade;

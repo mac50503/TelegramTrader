@@ -138,7 +138,7 @@ bool PostContext(void)
    string response;
    string minuteKey=ClientId+"-context-"+IntegerToString((long)(TimeGMT()/60));
    int status=Http.Request("POST","/api/mt5/context",body,NewRequestId("context"),minuteKey,response);
-   if(status>=200 && status<300) { LastContextSent=TimeCurrent(); return true; }
+   if(status>=200 && status<300) { LastContextSent=TimeLocal(); return true; }
    PrintFormat("Context rejected. http=%d response=%s",status,response);
    return false;
   }
@@ -277,6 +277,25 @@ bool SelectActivePosition(int i,double &open_price,ulong &deal_ticket)
       return true;
      }
    return false;
+  }
+
+// In hedging accounts PositionSelect(symbol) can select a different position of
+// the same symbol. Resolve the position created by this exact deal first, then
+// fall back to the per-signal order comment used by SelectActivePosition().
+bool ResolveFilledPosition(int i,const ulong result_deal,double &open_price,ulong &deal_ticket)
+  {
+   deal_ticket=result_deal;
+   if(result_deal>0 && HistoryDealSelect(result_deal))
+     {
+      ulong position_id=(ulong)HistoryDealGetInteger(result_deal,DEAL_POSITION_ID);
+      if(position_id>0 && PositionSelectByTicket(position_id))
+        {
+         Slots[i].positionTicket=position_id;
+         open_price=PositionGetDouble(POSITION_PRICE_OPEN);
+         return true;
+        }
+     }
+   return SelectActivePosition(i,open_price,deal_ticket);
   }
 
 bool RecoverPendingOrder(int i)
@@ -459,13 +478,22 @@ void ExecuteActiveSignal(int i)
       ? Trade.Buy(Slots[i].volume,symbol,0,Slots[i].stopLoss,Slots[i].takeProfit,comment)
       : Trade.Sell(Slots[i].volume,symbol,0,Slots[i].stopLoss,Slots[i].takeProfit,comment);
    uint retcode=Trade.ResultRetcode();
-   bool filled=sent && (retcode==TRADE_RETCODE_DONE || retcode==TRADE_RETCODE_DONE_PARTIAL) && PositionSelect(symbol);
-   if(filled)
+   bool broker_filled=sent && (retcode==TRADE_RETCODE_DONE || retcode==TRADE_RETCODE_DONE_PARTIAL);
+   double fill=Trade.ResultPrice();
+   ulong deal_ticket=Trade.ResultDeal();
+   bool position_resolved=broker_filled && ResolveFilledPosition(i,deal_ticket,fill,deal_ticket);
+   if(position_resolved)
      {
-      Slots[i].positionTicket=(ulong)PositionGetInteger(POSITION_TICKET);
-      double fill=Trade.ResultPrice();
       Slots[i].filledPrice=fill;
-      SetPendingExecution(i,"FILLED",fill,Trade.ResultOrder(),Trade.ResultDeal(),Slots[i].positionTicket,IntegerToString(retcode),Trade.ResultRetcodeDescription());
+      SetPendingExecution(i,"FILLED",fill,Trade.ResultOrder(),deal_ticket,Slots[i].positionTicket,IntegerToString(retcode),Trade.ResultRetcodeDescription());
+      TryReportPendingExecution(i);
+     }
+   else if(broker_filled)
+     {
+      // The order was already filled, so never send it again. Flag it for
+      // reconciliation instead of reporting another position's ticket.
+      SetPendingExecution(i,"UNKNOWN",fill,Trade.ResultOrder(),Trade.ResultDeal(),0,"POSITION_NOT_RESOLVED",
+                          "Broker filled the order but its position ticket could not be resolved");
       TryReportPendingExecution(i);
      }
    else
@@ -658,7 +686,9 @@ void OnTimer(void)
    Busy=true;
    // Keep the broker context fresh even while entries are executing. The server
    // requires a recent context before assigning additional queued signals.
-   if(TimeCurrent()-LastContextSent>=60) PostContext();
+   // Use wall-clock time for scheduling; TimeCurrent() may stop advancing when
+   // the symbol has no ticks, which would prevent context refreshes.
+   if(TimeLocal()-LastContextSent>=60) PostContext();
    for(int i=0;i<MAX_SLOTS;i++)
      {
       if(!Slots[i].used) continue;

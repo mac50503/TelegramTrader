@@ -1,6 +1,6 @@
 import type { TradeSide, TradingMode } from "./signal.js";
 
-export type TradeStatus = "ASSIGNED" | "SUBMITTED" | "FILLED" | "REJECTED" | "CLOSED" | "UNKNOWN";
+export type TradeStatus = "ASSIGNED" | "SUBMITTED" | "FILLED" | "REJECTED" | "CLOSED" | "CANCELED" | "UNKNOWN";
 export type ExecutionResult = "SIMULATED_EXECUTION" | "FILLED" | "REJECTED" | "UNKNOWN";
 
 export interface Trade {

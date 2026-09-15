@@ -49,6 +49,17 @@ export class CodexCliSignalAnalyzer implements SignalAnalyzer {
   constructor(private readonly options: CodexCliAnalyzerOptions) {}
 
   async analyze(message: TelegramMessage, signalId: string): Promise<SignalAnalysis> {
+    try {
+      return await this.analyzeOnce(message, signalId);
+    } catch (error) {
+      // Codex can fail transiently (context/session/CLI errors). Give it one
+      // fresh attempt after the requested 15-second cooldown.
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      return this.analyzeOnce(message, signalId);
+    }
+  }
+
+  private async analyzeOnce(message: TelegramMessage, signalId: string): Promise<SignalAnalysis> {
     const runId = `${signalId}-${randomUUID()}`;
     const schemaFile = join(tmpdir(), `telegram-trader-codex-schema-${runId}.json`);
     const outputFile = join(tmpdir(), `telegram-trader-codex-output-${runId}.json`);

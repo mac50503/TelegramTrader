@@ -132,6 +132,33 @@ CREATE TABLE IF NOT EXISTS mt5_clients (
   updated_at TEXT NOT NULL
 );
 
+-- Immutable broker ledger imported from MT5. Unlike positions, this preserves
+-- every deal even when an old EA bug executed the same signal more than once.
+CREATE TABLE IF NOT EXISTS mt5_deal_history (
+  deal_ticket TEXT PRIMARY KEY,
+  order_ticket TEXT NOT NULL,
+  position_ticket TEXT NOT NULL,
+  signal_id TEXT,
+  deal_time TEXT NOT NULL,
+  deal_time_msc INTEGER NOT NULL,
+  deal_type INTEGER NOT NULL,
+  entry_type INTEGER NOT NULL,
+  reason INTEGER NOT NULL,
+  magic TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  volume TEXT NOT NULL,
+  price TEXT NOT NULL,
+  profit TEXT NOT NULL,
+  commission TEXT NOT NULL,
+  swap TEXT NOT NULL,
+  fee TEXT NOT NULL,
+  comment TEXT,
+  imported_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mt5_deal_history_signal ON mt5_deal_history(signal_id);
+CREATE INDEX IF NOT EXISTS idx_mt5_deal_history_position ON mt5_deal_history(position_ticket);
+
 CREATE TABLE IF NOT EXISTS idempotency_records (
   scope TEXT NOT NULL,
   key TEXT NOT NULL,
