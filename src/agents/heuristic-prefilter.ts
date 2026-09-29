@@ -12,11 +12,10 @@ const ALGORITMO_XAU_CHAT_ID = "-1003802258175";
 const ALGORITMO_XAU_CLOSE_NOW = /\bvamos\s+encerrar\s+a\s+opera[cç][aã]o\s+agora\b/i;
 
 export function explicitManagementInstruction(text: string): SignalAnalysis | null {
-  // A running-trade update with both instructions is unambiguously management,
+  // A standalone "Take partials" or running-trade update is a management order,
   // even when a CLI classifies it as ordinary chat. Never infer a new entry here.
-  if (/\btrade\s+(?:is\s+)?active\b/i.test(text)
-    && /\btake\s+partials?\b/i.test(text)
-    && /\b(?:breakeven|set\s+be)\b/i.test(text)
+  if ((/^\s*take\s+partials?\b/i.test(text)
+    || (/\btrade\s+(?:is\s+)?active\b/i.test(text) && /\btake\s+partials?\b/i.test(text)))
     && !/\bentry\b/i.test(text)) {
     return { intent: "MANAGEMENT", action: "TAKE_PARTIALS_AND_BREAKEVEN", symbolHint: null, explicitStopLoss: null, confidence: 1 };
   }

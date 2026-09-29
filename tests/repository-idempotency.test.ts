@@ -68,7 +68,7 @@ describe("repositorio y cola", () => {
     expect(position.stop_loss).toBe("100");
   });
 
-  it("take partials cierra la orden completa cuando solo hay una posicion", () => {
+  it("take partials cierra la orden completa sin esperar ganancia cuando solo hay una posicion", () => {
     const signalId = queueSignal("102");
     const assignment = repo.assignNext("ea-1", "SIMULATION", 1)!;
     repo.acknowledge(signalId, "ea-1", assignment.assignmentToken);
@@ -84,8 +84,41 @@ describe("repositorio y cola", () => {
     const commands = repo.createCommandsForGroup(instruction.id, groups[0]!, instruction.action);
     expect(commands).toMatchObject([{ tradeId: assignment.tradeId, type: "CLOSE", status: "PENDING" }]);
     expect(repo.currentAssignments("ea-1")[0]?.managementCommand).toMatchObject({
-      commandId: commands[0]?.id, type: "CLOSE", requiresProfit: true
+      commandId: commands[0]?.id, type: "CLOSE", requiresProfit: false
     });
+  });
+
+  it("take partials ordena el cierre inmediato de todas las posiciones de una senal", () => {
+    const signalId = queueSignal("102");
+    const parent = repo.findById(signalId)!;
+    const siblings = [
+      repo.createSiblingLeg(parent, 1, 3, "103", signalId),
+      repo.createSiblingLeg(parent, 2, 3, "104", signalId)
+    ];
+    for (const sibling of siblings) {
+      repo.saveValidated(sibling.id, "0.1", "{}");
+      repo.setStatus(sibling.id, "QUEUED");
+    }
+    const assignments = Array.from({ length: 3 }, (_, index) => {
+      const assignment = repo.assignNext("ea-1", "SIMULATION", 3)!;
+      repo.acknowledge(assignment.signalId, "ea-1", assignment.assignmentToken);
+      repo.recordExecution({ signalId: assignment.signalId, clientId: "ea-1", assignmentToken: assignment.assignmentToken,
+        executionId: `EXE-${index}`, requestId: `req-${index}`, result: "SIMULATED_EXECUTION",
+        requestedPrice: "100", requestedVolume: "0.1", executedAt: new Date().toISOString() });
+      return assignment;
+    });
+    const instruction = repo.createManagementFromTelegram({ chatId: "1", messageId: "take-all",
+      timestamp: new Date().toISOString(), text: "Take partials. Set BE.", chatName: "test", source: "TELEGRAM" },
+    "TAKE_PARTIALS_AND_BREAKEVEN", null, null)!;
+    expect(repo.findOpenGroupsForChat("1")).toEqual([signalId]);
+    const commands = repo.createCommandsForGroup(instruction.id, signalId, instruction.action);
+    expect(commands).toHaveLength(3);
+    expect(commands.map((command) => command.tradeId)).toEqual(assignments.map((assignment) => assignment.tradeId));
+    expect(commands.every((command) => command.type === "CLOSE")).toBe(true);
+    expect(repo.currentAssignments("ea-1").map((assignment) => assignment.managementCommand)).toEqual(
+      commands.map((command) => ({ commandId: command.id, type: "CLOSE", requiresProfit: false,
+        idempotencyKey: `mgmt-command-result:${command.id}` }))
+    );
   });
 
   it("el limite diario cuenta ejecuciones reales y no asignaciones rechazadas", () => {

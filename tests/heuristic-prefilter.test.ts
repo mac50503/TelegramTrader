@@ -55,6 +55,14 @@ describe("PrefilteredSignalAnalyzer", () => {
       symbolHint: null, explicitStopLoss: null, confidence: 1 });
   });
 
+  it("reconoce Take partials como cierre del grupo aunque no mencione breakeven", async () => {
+    const inner: SignalAnalyzer = { analyze: () => { throw new Error("no deberia llamar al analizador"); } };
+    const prefilter = new PrefilteredSignalAnalyzer(inner, logger);
+    const result = await prefilter.analyze({ ...message, text: "Take partials now" }, "SIG-partials");
+    expect(result).toEqual({ intent: "MANAGEMENT", action: "TAKE_PARTIALS_AND_BREAKEVEN",
+      symbolHint: null, explicitStopLoss: null, confidence: 1 });
+  });
+
   it("cierra todas las posiciones del grupo ALGORITMO XAU ante la frase portuguesa", async () => {
     const inner: SignalAnalyzer = { analyze: () => { throw new Error("no deberia llamar al analizador"); } };
     const prefilter = new PrefilteredSignalAnalyzer(inner, logger);

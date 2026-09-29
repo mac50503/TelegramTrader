@@ -96,12 +96,12 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Ma
       const rows = this.db.prepare(`SELECT t.id trade_id,t.client_id,t.status,s.leg_index,p.status position_status FROM trades t JOIN signals s ON s.id=t.signal_id LEFT JOIN positions p ON p.trade_id=t.id
         WHERE s.signal_group_id=? AND t.status IN ('FILLED','ASSIGNED','SUBMITTED') ORDER BY s.leg_index`).all(groupId) as Row[];
       const filled = rows.filter((r) => r.status === "FILLED" && r.position_status === "OPEN");
-      const target = (action === "CLOSE_PARTIAL" || action === "TAKE_PARTIALS_AND_BREAKEVEN") ? filled[0]?.trade_id : null;
+      const target = action === "CLOSE_PARTIAL" ? filled[0]?.trade_id : null;
       const commands: ManagementCommand[] = [];
       for (const row of rows) {
         const isFilled = row.status === "FILLED" && row.position_status === "OPEN";
         if (!isFilled) continue;
-        const type = action === "MOVE_SL_TO_BREAKEVEN" || (action === "TAKE_PARTIALS_AND_BREAKEVEN" && row.trade_id !== target) ? "MOVE_SL_TO_BREAKEVEN" : "CLOSE";
+        const type = action === "MOVE_SL_TO_BREAKEVEN" || (action === "CLOSE_PARTIAL" && row.trade_id !== target) ? "MOVE_SL_TO_BREAKEVEN" : "CLOSE";
         const id = newId("MGC"); const timestamp = now();
         this.db.prepare("INSERT INTO management_commands(id,instruction_id,trade_id,type,status,created_at,updated_at) VALUES(?,?,?,?,'PENDING',?,?)").run(id,instructionId,row.trade_id,type,timestamp,timestamp);
         commands.push(this.findManagementCommand(id)!);
@@ -262,10 +262,8 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Ma
       groupId: String(row.signal_group_id ?? row.id), legIndex: Number(row.leg_index ?? 0), legCount: Number(row.leg_count ?? 1) };
     const command = this.findPendingCommand(String(row.trade_id));
     if (!command) return assignment;
-    const instruction = this.db.prepare("SELECT action FROM management_instructions WHERE id=?")
-      .get(command.instructionId) as { action: ManagementAction };
     return { ...assignment, managementCommand: { commandId: command.id, type: command.type,
-      requiresProfit: command.type === "CLOSE" && instruction.action === "TAKE_PARTIALS_AND_BREAKEVEN",
+      requiresProfit: false,
       idempotencyKey: `mgmt-command-result:${command.id}` } };
   }
 
