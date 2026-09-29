@@ -32,8 +32,6 @@ input bool RequireDemoAccountForLive=true;
 input int MaxEntryDeviationPoints=50;
 input int MaxEntryWaitSeconds=900;
 input int MaxSlippagePoints=20;
-input bool EnableTrendFilter=true;
-input double TrendEmaBufferPct=0.2;
 
 // Cada slot representa una entrada activa (asignada por el servidor) hasta que se cierra o se
 // rechaza. La capacidad del EA es fija (MAX_SLOTS); el límite real de entradas simultáneas lo
@@ -70,6 +68,9 @@ struct ActiveTrade
    ulong            pendingPositionTicket;
    string           pendingRetcode;
    string           pendingDescription;
+   string           managementCommandId;
+   string           managementCommandType;
+   bool             managementRequiresProfit;
   };
 
 ActiveTrade Slots[MAX_SLOTS];
@@ -98,6 +99,8 @@ void ResetSlot(int i)
    Slots[i].pendingExecutionResult=""; Slots[i].pendingExecutionPrice=0;
    Slots[i].pendingOrderTicketResult=0; Slots[i].pendingDealTicket=0; Slots[i].pendingPositionTicket=0;
    Slots[i].pendingRetcode=""; Slots[i].pendingDescription="";
+   Slots[i].managementCommandId=""; Slots[i].managementCommandType="";
+   Slots[i].managementRequiresProfit=false;
   }
 
 string NewRequestId(const string action,const int slot=-1)
@@ -113,44 +116,12 @@ string SelectedBrokerSymbol(void)
 double GetTrendEMA40M5(void)
   {
    if(TrendEma40M5Handle==INVALID_HANDLE) return 0.0;
+   if(BarsCalculated(TrendEma40M5Handle)<40) return 0.0;
    double emaBuffer[];
    ArraySetAsSeries(emaBuffer,true);
-   if(CopyBuffer(TrendEma40M5Handle,0,0,1,emaBuffer)<=0) return 0.0;
+   if(CopyBuffer(TrendEma40M5Handle,0,0,1,emaBuffer)!=1) return 0.0;
+   if(!MathIsValidNumber(emaBuffer[0]) || emaBuffer[0]==EMPTY_VALUE || emaBuffer[0]<=0.0) return 0.0;
    return emaBuffer[0];
-  }
-
-// Replicates the trend rule from Change_of_Direction_MultiPattern_Continuo:
-// EMA40 is calculated on M5 and compared with the previous closed candle on
-// the chart timeframe. The percentage around the EMA is a neutral zone.
-bool IsSignalTrendAllowed(int i,double &referencePrice,double &ema40,double &zoneBoundary)
-  {
-   referencePrice=0.0;
-   ema40=0.0;
-   zoneBoundary=0.0;
-   if(!EnableTrendFilter) return true;
-
-   string symbol=SelectedBrokerSymbol();
-   referencePrice=iClose(symbol,_Period,1);
-   ema40=GetTrendEMA40M5();
-
-   // Preserve the source strategy's fail-open behavior while history or the
-   // indicator buffer is still loading.
-   if(referencePrice<=0.0 || ema40<=0.0)
-     {
-      PrintFormat("Trend filter has no data yet; allowing signal=%s side=%s price=%.8f ema40=%.8f",
-                  Slots[i].signalId,Slots[i].side,referencePrice,ema40);
-      return true;
-     }
-
-   double upperZone=ema40*(1.0+TrendEmaBufferPct/100.0);
-   double lowerZone=ema40*(1.0-TrendEmaBufferPct/100.0);
-   zoneBoundary=Slots[i].side=="BUY" ? upperZone : lowerZone;
-
-   bool allowed=Slots[i].side=="BUY" ? referencePrice>upperZone : referencePrice<lowerZone;
-   PrintFormat("Trend filter signal=%s side=%s allowed=%s price=%.8f ema40=%.8f lower=%.8f upper=%.8f timeframe=%s",
-               Slots[i].signalId,Slots[i].side,allowed ? "true" : "false",referencePrice,ema40,
-               lowerZone,upperZone,EnumToString(_Period));
-   return allowed;
   }
 
 bool PostContext(void)
@@ -212,7 +183,10 @@ bool ParseAssignment(const string response,int i)
    Slots[i].stopLoss=StringToDouble(JsonString(response,"stopLoss","0"));
    Slots[i].takeProfit=StringToDouble(JsonString(response,"takeProfit","0"));
    Slots[i].volume=StringToDouble(JsonString(response,"volume","0"));
-   Slots[i].entryWaitStarted=TimeCurrent();
+   Slots[i].managementCommandId=JsonString(response,"commandId","");
+   Slots[i].managementCommandType=JsonString(response,"type","");
+   Slots[i].managementRequiresProfit=JsonBool(response,"requiresProfit",false);
+   Slots[i].entryWaitStarted=TimeLocal();
    return Slots[i].signalId!="" && Slots[i].assignmentToken!="" && Slots[i].symbol!="" && Slots[i].volume>0;
   }
 
@@ -367,6 +341,15 @@ bool RecoverPendingOrder(int i)
 
 void MonitorPendingOrder(int i)
   {
+   // An order left by an older EA build can fill without a new EMA check.
+   // Cancel it before continuing with market-only entries.
+   if(Slots[i].pendingOrderTicket>0 && OrderSelect(Slots[i].pendingOrderTicket))
+     {
+      Trade.SetExpertMagicNumber(ExpertMagicNumber);
+      if(!Trade.OrderDelete(Slots[i].pendingOrderTicket))
+         PrintFormat("Could not cancel old pending entry. signal=%s ticket=%I64u retcode=%d",
+                     Slots[i].signalId,Slots[i].pendingOrderTicket,Trade.ResultRetcode());
+     }
    double fill_price=0;
    ulong deal_ticket=0;
    if(SelectActivePosition(i,fill_price,deal_ticket))
@@ -480,15 +463,26 @@ void ExecuteActiveSignal(int i)
    MqlTick tick;
    if(!SymbolInfoTick(symbol,tick)) { Slots[i].state=ERROR_STATE; return; }
    double price=Slots[i].side=="BUY" ? tick.ask : tick.bid;
-   double trendPrice=0.0;
-   double trendEma40=0.0;
-   double trendBoundary=0.0;
-   if(!IsSignalTrendAllowed(i,trendPrice,trendEma40,trendBoundary))
+   double ema40=GetTrendEMA40M5();
+   if(ema40<=0.0)
      {
+      if(TimeLocal()-Slots[i].entryWaitStarted>=MaxEntryWaitSeconds)
+        {
+         Slots[i].orderAlreadySent=true;
+         SetPendingExecution(i,"REJECTED",price,0,0,0,"EMA40_M5_UNAVAILABLE",
+                             "EMA40 M5 data unavailable before entry timeout");
+         TryReportPendingExecution(i);
+        }
+      return;
+     }
+   bool trendAllowed=Slots[i].side=="BUY" ? price>ema40 : price<ema40;
+   if(!trendAllowed)
+     {
+      PrintFormat("EMA40 M5 blocked signal=%s side=%s price=%.8f ema40=%.8f",
+                  Slots[i].signalId,Slots[i].side,price,ema40);
       Slots[i].orderAlreadySent=true;
-      string description=StringFormat("%s blocked by EMA40 M5 trend filter: candle close %.8f, boundary %.8f, EMA %.8f",
-                                      Slots[i].side,trendPrice,trendBoundary,trendEma40);
-      SetPendingExecution(i,"REJECTED",price,0,0,0,"TREND_FILTER_BLOCKED",description);
+      SetPendingExecution(i,"REJECTED",price,0,0,0,"EMA40_M5_DIRECTION",
+                          "Signal direction conflicts with current price versus EMA40 M5");
       TryReportPendingExecution(i);
       return;
      }
@@ -514,7 +508,15 @@ void ExecuteActiveSignal(int i)
    double entryTolerance=MaxEntryDeviationPoints*point;
    if(price<Slots[i].entryMin-entryTolerance || price>Slots[i].entryMax+entryTolerance)
      {
-      PlacePendingEntry(i,price,entryTolerance);
+      // A broker pending order can fill after the EMA reverses. Wait locally
+      // and recheck the EMA before market entry.
+      if(TimeLocal()-Slots[i].entryWaitStarted>=MaxEntryWaitSeconds)
+        {
+         Slots[i].orderAlreadySent=true;
+         SetPendingExecution(i,"REJECTED",price,0,0,0,"ENTRY_TIMEOUT",
+                             "Price did not enter the allowed zone before timeout");
+         TryReportPendingExecution(i);
+        }
       return;
      }
    bool validAtMarket=Slots[i].side=="BUY"
@@ -648,6 +650,55 @@ void MonitorPosition(int i)
      }
   }
 
+bool ReportManagementResult(int i,const string status,const string code,const string description)
+  {
+   if(Slots[i].managementCommandId=="") return false;
+   string body="{\"clientId\":\""+JsonEscape(ClientId)+"\",\"assignmentToken\":\""+JsonEscape(Slots[i].assignmentToken)+"\",\"status\":\""+status+"\"";
+   if(code!="") body+=",\"resultCode\":\""+JsonEscape(code)+"\"";
+   if(description!="") body+=",\"resultDescription\":\""+JsonEscape(description)+"\"";
+   body+="}";
+   string response;
+   string path="/api/trades/"+Slots[i].tradeId+"/management-command/"+Slots[i].managementCommandId+"/result";
+   int http=Http.Request("POST",path,body,NewRequestId("mgmt-result",i),"mgmt-command-result:"+Slots[i].managementCommandId,response);
+   if(http>=200 && http<300) { Slots[i].managementCommandId=""; Slots[i].managementCommandType=""; Slots[i].managementRequiresProfit=false; return true; }
+   return false;
+  }
+
+bool ExecuteManagementCommand(int i)
+  {
+   if(Slots[i].managementCommandId=="" || Slots[i].state!=POSITION_OPEN) return false;
+   if(Slots[i].managementCommandType=="MOVE_SL_TO_BREAKEVEN")
+     {
+      if(!PositionSelectByTicket(Slots[i].positionTicket)) return ReportManagementResult(i,"APPLIED","ALREADY_CLOSED","Position already closed");
+      double tp=PositionGetDouble(POSITION_TP);
+      bool valid=Slots[i].side=="BUY" ? (tp<=0 || Slots[i].filledPrice<tp) : (tp<=0 || Slots[i].filledPrice>tp);
+      if(!valid) return ReportManagementResult(i,"REJECTED","INVALID_BREAKEVEN_LEVEL","Breakeven crosses current take profit");
+      if(!Trade.PositionModify(Slots[i].positionTicket,Slots[i].filledPrice,tp)) return ReportManagementResult(i,"REJECTED",IntegerToString((int)Trade.ResultRetcode()),Trade.ResultRetcodeDescription());
+      if(ReportSlUpdate(i,Slots[i].filledPrice,"MANAGEMENT_BREAKEVEN") && ReportManagementResult(i,"APPLIED","BREAKEVEN_SET","Stop moved to breakeven")) return true;
+      return false;
+     }
+   if(Slots[i].managementCommandType!="CLOSE") return ReportManagementResult(i,"REJECTED","UNKNOWN_COMMAND","Unsupported management command");
+   if(!PositionSelectByTicket(Slots[i].positionTicket)) return ReportManagementResult(i,"APPLIED","ALREADY_CLOSED","Position already closed");
+   // Take partials waits for positive floating P/L on the position being closed.
+   // Include accumulated swap; the broker may still fill at another price.
+   if(Slots[i].managementRequiresProfit &&
+      PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP)<=0.0) return false;
+   if(!Trade.PositionClose(Slots[i].positionTicket,MaxSlippagePoints)) return ReportManagementResult(i,"REJECTED",IntegerToString((int)Trade.ResultRetcode()),Trade.ResultRetcodeDescription());
+   return ReportManagementResult(i,"APPLIED","CLOSED","Position closed by management command");
+  }
+
+void RefreshManagementCommands(void)
+  {
+   string response; int status=Http.Request("GET","/api/trades/current?clientId="+ClientId,"",NewRequestId("mgmt-current"),"",response);
+   if(status<200 || status>=300) return;
+   string items[]; if(!JsonArrayObjects(response,"trades",items)) return;
+   for(int k=0;k<ArraySize(items);k++)
+     {
+      string tradeId=JsonString(items[k],"tradeId",""); string commandId=JsonString(items[k],"commandId","");
+      for(int i=0;i<MAX_SLOTS;i++) if(Slots[i].used && Slots[i].tradeId==tradeId && commandId!="") { Slots[i].managementCommandId=commandId; Slots[i].managementCommandType=JsonString(items[k],"type",""); Slots[i].managementRequiresProfit=JsonBool(items[k],"requiresProfit",false); }
+     }
+  }
+
 void RecoverCurrentTrade(void)
   {
    string response;
@@ -719,22 +770,20 @@ void CheckNext(void)
 
 int OnInit(void)
   {
-   if(ApiKey=="" || ClientId=="" || PollIntervalSeconds<1 || TrendEmaBufferPct<0.0) return INIT_PARAMETERS_INCORRECT;
+   if(ApiKey=="" || ClientId=="" || PollIntervalSeconds<1 || MaxEntryWaitSeconds<1) return INIT_PARAMETERS_INCORRECT;
    string symbol=SelectedBrokerSymbol();
    if(!SymbolSelect(symbol,true)) return INIT_FAILED;
-   if(EnableTrendFilter)
+   TrendEma40M5Handle=iMA(symbol,PERIOD_M5,40,0,MODE_EMA,PRICE_CLOSE);
+   if(TrendEma40M5Handle==INVALID_HANDLE)
      {
-      TrendEma40M5Handle=iMA(symbol,PERIOD_M5,40,0,MODE_EMA,PRICE_CLOSE);
-      if(TrendEma40M5Handle==INVALID_HANDLE)
-         PrintFormat("WARNING: Failed to create EMA40 M5 trend filter for %s. Signals will be allowed until data is available.",symbol);
-      else
-         PrintFormat("EMA40 M5 trend filter initialized. symbol=%s bufferPct=%.4f priceTimeframe=%s",
-                     symbol,TrendEmaBufferPct,EnumToString(_Period));
+      PrintFormat("Failed to create EMA40 M5 trend filter for %s. EA will not trade.",symbol);
+      return INIT_FAILED;
      }
-   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d trendFilter=%s trendBufferPct=%.4f accountMode=%d maxSlots=%d",
+   PrintFormat("EMA40 M5 trend filter initialized. symbol=%s",symbol);
+   PrintFormat("TelegramTraderEA safety: live=%s demoOnly=%s entryDeviationPoints=%d entryWaitSeconds=%d slippagePoints=%d trendFilter=EMA40_M5 accountMode=%d maxSlots=%d",
                EnableLiveTrading ? "true" : "false",RequireDemoAccountForLive ? "true" : "false",
-               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,EnableTrendFilter ? "true" : "false",
-               TrendEmaBufferPct,(int)AccountInfoInteger(ACCOUNT_TRADE_MODE),MAX_SLOTS);
+               MaxEntryDeviationPoints,MaxEntryWaitSeconds,MaxSlippagePoints,
+               (int)AccountInfoInteger(ACCOUNT_TRADE_MODE),MAX_SLOTS);
    for(int i=0;i<MAX_SLOTS;i++) ResetSlot(i);
    Http.Configure(ApiUrl,ApiKey,HttpTimeoutMs);
    Trade.SetExpertMagicNumber(ExpertMagicNumber);
@@ -764,9 +813,11 @@ void OnTimer(void)
    // Use wall-clock time for scheduling; TimeCurrent() may stop advancing when
    // the symbol has no ticks, which would prevent context refreshes.
    if(TimeLocal()-LastContextSent>=60) PostContext();
+   RefreshManagementCommands();
    for(int i=0;i<MAX_SLOTS;i++)
      {
       if(!Slots[i].used) continue;
+      if(ExecuteManagementCommand(i)) continue;
       if(Slots[i].state==POSITION_OPEN || Slots[i].state==REPORTING_CLOSE) MonitorPosition(i);
       else if(Slots[i].state==EXECUTING) ExecuteActiveSignal(i);
      }

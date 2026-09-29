@@ -2,6 +2,9 @@ import type { TradeSide, TradingMode } from "./signal.js";
 
 export type TradeStatus = "ASSIGNED" | "SUBMITTED" | "FILLED" | "REJECTED" | "CLOSED" | "CANCELED" | "UNKNOWN";
 export type ExecutionResult = "SIMULATED_EXECUTION" | "FILLED" | "REJECTED" | "UNKNOWN";
+export type ManagementCommandType = "CLOSE" | "MOVE_SL_TO_BREAKEVEN";
+export type ManagementCommandStatus = "PENDING" | "ACKNOWLEDGED" | "APPLIED" | "REJECTED" | "UNKNOWN";
+export interface ManagementCommand { id: string; instructionId: string; tradeId: string; type: ManagementCommandType; status: ManagementCommandStatus; resultCode: string | null; resultDescription: string | null; createdAt: string; updatedAt: string; }
 
 export interface Trade {
   id: string;
@@ -33,6 +36,7 @@ export interface TradeAssignment {
   groupId: string;
   legIndex: number;
   legCount: number;
+  managementCommand?: { commandId: string; type: ManagementCommandType; requiresProfit: boolean; idempotencyKey: string };
 }
 
 export interface Mt5Context {

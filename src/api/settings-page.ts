@@ -117,6 +117,19 @@ function showStatus(message, ok) {
   el.className = ok ? "ok" : "err";
 }
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForServerRestart() {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    await delay(250);
+    try {
+      const health = await fetch("/api/health", { cache: "no-store" });
+      if (health.ok) return true;
+    } catch (_) { /* The old process is expected to be offline briefly. */ }
+  }
+  return false;
+}
+
 function fieldHtml(field, value) {
   const id = "f_" + field.key;
   if (field.type === "bool") {
@@ -213,16 +226,28 @@ document.getElementById("logoutBtn").addEventListener("click", () => {
 });
 
 document.getElementById("saveBtn").addEventListener("click", async () => {
+  const saveButton = document.getElementById("saveBtn");
   const changes = collectChanges();
   if (Object.keys(changes).length === 0) { showStatus("No hay cambios que guardar.", true); return; }
+  saveButton.disabled = true;
   const res = await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) });
   const body = await res.json().catch(() => ({}));
   if (res.ok) {
-    showStatus("Guardado. Si el servidor corre con npm run dev, se va a reiniciar solo en unos segundos.", true);
+    showStatus(body.restarting ? "Cambios guardados. Reiniciando servidor..." : "Cambios guardados.", true);
     initialValues = { ...initialValues, ...changes };
+    if (body.restarting) {
+      const restarted = await waitForServerRestart();
+      if (restarted) {
+        await loadSettings();
+        showStatus("Cambios guardados y servidor reiniciado.", true);
+      } else {
+        showStatus("Cambios guardados, pero el servidor no volvió a responder todavía.", false);
+      }
+    }
   } else {
     showStatus("Error al guardar: " + (body.error?.message || res.status), false);
   }
+  saveButton.disabled = false;
 });
 
 (async () => {

@@ -16,7 +16,7 @@ El proyecto inicia en `SIMULATION` por defecto. El agente de IA interpreta texto
 - Ejecución simulada con precios recibidos por MT5.
 - LIVE deshabilitado por defecto y protegido por confirmaciones múltiples.
 
-El EA ejecuta a mercado cuando el precio está dentro de la zona permitida. Si está fuera, coloca una orden pendiente `limit` o `stop` con expiración en `MaxEntryWaitSeconds`. El deslizamiento máximo se configura con `MaxSlippagePoints`. Cada fill se vincula con su posición mediante `DEAL_POSITION_ID`, evitando confundir tickets cuando existen varias posiciones del mismo símbolo en cuentas hedging.
+Antes de abrir una operación, el EA compara el precio actual de ejecución (ask para compra, bid para venta) con la EMA de 40 periodos del símbolo en M5. Solo compra por encima y solo vende por debajo; la igualdad o la dirección contraria rechazan la señal. Si la EMA no está disponible, espera hasta `MaxEntryWaitSeconds` y luego rechaza la entrada. Si el precio está fuera de la zona permitida, espera localmente hasta ese mismo plazo y vuelve a comprobar la EMA antes de enviar una orden a mercado. No coloca nuevas órdenes pendientes que puedan activarse después de que cambie la tendencia. El deslizamiento máximo se configura con `MaxSlippagePoints`. Cada fill se vincula con su posición mediante `DEAL_POSITION_ID`, evitando confundir tickets cuando existen varias posiciones del mismo símbolo en cuentas hedging.
 
 ## Arquitectura
 
@@ -292,6 +292,10 @@ IDLE -> CHECKING_SIGNAL -> EXECUTING -> POSITION_OPEN -> REPORTING_CLOSE -> IDLE
 ```
 
 El EA consulta `/api/trades/next` mientras tenga slots libres. El servidor aplica `MAX_SIMULTANEOUS_TRADES` por cliente. Al reiniciar, `/api/trades/current` permite recuperar asignaciones, órdenes pendientes y posiciones abiertas. Cuando TP1 cierra por take-profit, el EA mueve las piernas posteriores del mismo grupo a breakeven y reporta el nuevo SL.
+
+Una instrucción de Telegram `take partials` cierra por completo la primera posición abierta de la señal cuando su beneficio flotante, incluido el swap, es positivo. Mientras no lo sea, el cierre queda pendiente y el EA vuelve a comprobarlo en cada ciclo. Si hay más posiciones abiertas de esa misma señal, el EA mueve sus stops a breakeven. Si solo hay una posición abierta, la cierra completa al cumplirse la condición. El beneficio realizado puede diferir del flotante por deslizamiento y comisiones.
+
+Para el chat **ALGORITMO XAU ( GOLD )**, la frase `Vamos encerrar a operação agora` genera un cierre inmediato de todas las posiciones abiertas de su señal activa. Este cierre no espera a que el beneficio sea positivo. Si hay varias señales activas del mismo chat, la instrucción queda marcada como ambigua para evitar cerrar una señal equivocada.
 
 ## Simulation Mode
 

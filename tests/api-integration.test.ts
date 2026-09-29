@@ -99,6 +99,7 @@ describe("Página de configuración (/settings)", () => {
   let app: Awaited<ReturnType<typeof buildServer>>;
   let dir: string;
   let envPath: string;
+  let restartRequested: boolean;
 
   beforeEach(async () => {
     db = openDatabase(":memory:"); repo = new SqliteRepositories(db);
@@ -107,7 +108,8 @@ describe("Página de configuración (/settings)", () => {
     dir = mkdtempSync(join(tmpdir(), "tt-settings-"));
     envPath = join(dir, ".env");
     writeFileSync(envPath, "API_KEY=test-api-key-at-least-16\nAI_CLAUDE_MODEL=haiku\nTRADING_MODE=SIMULATION\n");
-    app = await buildServer(config, repo, pipeline, logger, undefined, envPath);
+    restartRequested = false;
+    app = await buildServer(config, repo, pipeline, logger, undefined, envPath, () => { restartRequested = true; });
   });
   afterEach(async () => { await app.close(); db.close(); rmSync(dir, { recursive: true, force: true }); });
 
@@ -130,6 +132,8 @@ describe("Página de configuración (/settings)", () => {
   it("guarda un cambio válido y lo refleja en /api/settings", async () => {
     const post = await app.inject({ method: "POST", url: "/api/settings", headers: auth, payload: { AI_CLAUDE_MODEL: "opus" } });
     expect(post.statusCode).toBe(200);
+    expect(post.json()).toMatchObject({ saved: { AI_CLAUDE_MODEL: "opus" }, restarting: true });
+    expect(restartRequested).toBe(true);
     const get = await app.inject({ method: "GET", url: "/api/settings", headers: auth });
     expect(get.json().AI_CLAUDE_MODEL).toBe("opus");
   });

@@ -1,11 +1,11 @@
 import type Database from "better-sqlite3";
 import { Decimal } from "decimal.js";
 import type {
-  AuditRepository, ContextRepository, IdempotencyRepository, RecordCloseInput, RecordExecutionInput, RecordSlUpdateInput,
+  AuditRepository, ContextRepository, IdempotencyRepository, ManagementRepository, RecordCloseInput, RecordExecutionInput, RecordSlUpdateInput,
   SignalRepository, TradeRepository
 } from "../application/ports.js";
-import type { SignalAnalysis, SignalStatus, TelegramMessage, TradeSignal, TradingMode } from "../models/signal.js";
-import type { Mt5Context, Trade, TradeAssignment } from "../models/trade.js";
+import type { ManagementAction, ManagementInstruction, SignalAnalysis, SignalStatus, TelegramMessage, TradeSignal, TradingMode } from "../models/signal.js";
+import type { ManagementCommand, Mt5Context, Trade, TradeAssignment } from "../models/trade.js";
 import { ConflictError, NotFoundError } from "../shared/errors.js";
 import { newAssignmentToken, newId } from "../shared/ids.js";
 
@@ -49,8 +49,86 @@ function mapTrade(row: Row): Trade {
   };
 }
 
-export class SqliteRepositories implements SignalRepository, TradeRepository, ContextRepository, IdempotencyRepository, AuditRepository {
+export class SqliteRepositories implements SignalRepository, TradeRepository, ManagementRepository, ContextRepository, IdempotencyRepository, AuditRepository {
   constructor(private readonly db: Database.Database) {}
+
+  createManagementFromTelegram(message: TelegramMessage, action: ManagementAction, symbolHint: string | null, explicitStopLoss: string | null): ManagementInstruction | null {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM management_instructions WHERE source=? AND telegram_chat_id=? AND telegram_message_id=?").get(message.source, message.chatId, message.messageId) as Row | undefined;
+      if (existing) return null;
+      const id = newId("MGT"); const timestamp = now();
+      this.db.prepare(`INSERT INTO management_instructions(id,telegram_chat_id,telegram_message_id,source,chat_name,original_message,action,symbol_hint,explicit_stop_loss,status,received_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,'PENDING_RESOLUTION',?,?,?)`).run(id,message.chatId,message.messageId,message.source,message.chatName,message.text,action,symbolHint,explicitStopLoss,message.timestamp,timestamp,timestamp);
+      this.recordEvent("MANAGEMENT_RECEIVED", { source: message.source, status: "PENDING_RESOLUTION", payload: { instructionId: id, chatId: message.chatId, action } });
+      return this.findManagementInstruction(id);
+    })();
+  }
+
+  findOpenGroupsForChat(chatId: string): string[] {
+    const rows = this.db.prepare(`SELECT DISTINCT s.signal_group_id FROM trades t JOIN signals s ON s.id=t.signal_id JOIN positions p ON p.trade_id=t.id
+      WHERE s.telegram_chat_id=? AND t.status='FILLED' AND p.status='OPEN' AND p.closed_at IS NULL AND s.signal_group_id IS NOT NULL ORDER BY s.signal_group_id`).all(chatId) as Row[];
+    return rows.map((r) => String(r.signal_group_id));
+  }
+
+  countOpenTradesForGroup(groupId: string): number {
+    const row = this.db.prepare(`SELECT COUNT(*) count FROM trades t JOIN signals s ON s.id=t.signal_id JOIN positions p ON p.trade_id=t.id
+      WHERE s.signal_group_id=? AND t.status='FILLED' AND p.status='OPEN' AND p.closed_at IS NULL`).get(groupId) as { count: number };
+    return row.count;
+  }
+
+  resolve(instructionId: string, groupId: string): ManagementInstruction {
+    this.db.prepare("UPDATE management_instructions SET resolved_signal_group_id=?,status='RESOLVED',resolved_at=?,updated_at=?,version=version+1 WHERE id=?").run(groupId,now(),now(),instructionId);
+    return this.findManagementInstruction(instructionId)!;
+  }
+
+  markAmbiguous(instructionId: string, candidateGroupIds: string[]): ManagementInstruction {
+    this.db.prepare("UPDATE management_instructions SET status='AMBIGUOUS',rejection_reason=?,updated_at=?,version=version+1 WHERE id=?").run(`Multiple open groups: ${candidateGroupIds.join(",")}`,now(),instructionId);
+    return this.findManagementInstruction(instructionId)!;
+  }
+
+  markRejected(instructionId: string, code: string, reason: string): ManagementInstruction {
+    this.db.prepare("UPDATE management_instructions SET status='REJECTED',rejection_code=?,rejection_reason=?,updated_at=?,version=version+1 WHERE id=?").run(code,reason,now(),instructionId);
+    return this.findManagementInstruction(instructionId)!;
+  }
+
+  createCommandsForGroup(instructionId: string, groupId: string, action: ManagementAction): ManagementCommand[] {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT t.id trade_id,t.client_id,t.status,s.leg_index,p.status position_status FROM trades t JOIN signals s ON s.id=t.signal_id LEFT JOIN positions p ON p.trade_id=t.id
+        WHERE s.signal_group_id=? AND t.status IN ('FILLED','ASSIGNED','SUBMITTED') ORDER BY s.leg_index`).all(groupId) as Row[];
+      const filled = rows.filter((r) => r.status === "FILLED" && r.position_status === "OPEN");
+      const target = (action === "CLOSE_PARTIAL" || action === "TAKE_PARTIALS_AND_BREAKEVEN") ? filled[0]?.trade_id : null;
+      const commands: ManagementCommand[] = [];
+      for (const row of rows) {
+        const isFilled = row.status === "FILLED" && row.position_status === "OPEN";
+        if (!isFilled) continue;
+        const type = action === "MOVE_SL_TO_BREAKEVEN" || (action === "TAKE_PARTIALS_AND_BREAKEVEN" && row.trade_id !== target) ? "MOVE_SL_TO_BREAKEVEN" : "CLOSE";
+        const id = newId("MGC"); const timestamp = now();
+        this.db.prepare("INSERT INTO management_commands(id,instruction_id,trade_id,type,status,created_at,updated_at) VALUES(?,?,?,?,'PENDING',?,?)").run(id,instructionId,row.trade_id,type,timestamp,timestamp);
+        commands.push(this.findManagementCommand(id)!);
+      }
+      this.db.prepare("UPDATE management_instructions SET status='APPLIED',applied_at=?,updated_at=?,version=version+1 WHERE id=?").run(now(),now(),instructionId);
+      return commands;
+    })();
+  }
+
+  findPendingCommand(tradeId: string): ManagementCommand | null {
+    const row = this.db.prepare("SELECT * FROM management_commands WHERE trade_id=? AND status='PENDING' ORDER BY created_at LIMIT 1").get(tradeId) as Row | undefined;
+    return row ? this.mapManagementCommand(row) : null;
+  }
+
+  recordCommandResult(commandId: string, clientId: string, status: "APPLIED" | "REJECTED" | "UNKNOWN", details?: { code?: string; description?: string }): ManagementCommand {
+    const row = this.db.prepare("SELECT c.*,t.client_id FROM management_commands c JOIN trades t ON t.id=c.trade_id WHERE c.id=?").get(commandId) as Row | undefined;
+    if (!row || String(row.client_id) !== clientId) throw new ConflictError("INVALID_ASSIGNMENT", "Management command does not belong to this client");
+    this.db.prepare("UPDATE management_commands SET status=?,result_code=?,result_description=?,updated_at=?,version=version+1 WHERE id=?").run(status,details?.code ?? null,details?.description ?? null,now(),commandId);
+    return this.findManagementCommand(commandId)!;
+  }
+
+  private findManagementInstruction(id: string): ManagementInstruction | null {
+    const r = this.db.prepare("SELECT * FROM management_instructions WHERE id=?").get(id) as Row | undefined; if (!r) return null;
+    return { id:String(r.id),telegramChatId:String(r.telegram_chat_id),telegramMessageId:String(r.telegram_message_id),source:String(r.source),chatName:String(r.chat_name),originalMessage:String(r.original_message),action:r.action as ManagementAction,symbolHint:r.symbol_hint === null ? null : String(r.symbol_hint),explicitStopLoss:r.explicit_stop_loss === null ? null : String(r.explicit_stop_loss),resolvedSignalGroupId:r.resolved_signal_group_id === null ? null : String(r.resolved_signal_group_id),status:r.status as ManagementInstruction["status"],rejectionCode:r.rejection_code === null ? null : String(r.rejection_code),rejectionReason:r.rejection_reason === null ? null : String(r.rejection_reason),receivedAt:String(r.received_at),resolvedAt:r.resolved_at === null ? null : String(r.resolved_at),appliedAt:r.applied_at === null ? null : String(r.applied_at),createdAt:String(r.created_at),updatedAt:String(r.updated_at),version:Number(r.version)};
+  }
+  private findManagementCommand(id: string): ManagementCommand | null { const r=this.db.prepare("SELECT * FROM management_commands WHERE id=?").get(id) as Row|undefined; return r ? this.mapManagementCommand(r) : null; }
+  private mapManagementCommand(r: Row): ManagementCommand { return { id:String(r.id),instructionId:String(r.instruction_id),tradeId:String(r.trade_id),type:r.type as ManagementCommand["type"],status:r.status as ManagementCommand["status"],resultCode:r.result_code===null?null:String(r.result_code),resultDescription:r.result_description===null?null:String(r.result_description),createdAt:String(r.created_at),updatedAt:String(r.updated_at) }; }
 
   createFromTelegram(message: TelegramMessage, expiresAt: string): TradeSignal | null {
     return this.db.transaction(() => {
@@ -97,7 +175,7 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
   }
 
   saveAnalysis(id: string, analysis: SignalAnalysis): void {
-    const detected = analysis.isSignal ? analysis : null;
+    const detected = ("isSignal" in analysis && analysis.isSignal) || ("intent" in analysis && analysis.intent === "NEW_SIGNAL") ? analysis : null;
     const result = this.db.prepare(`UPDATE signals SET ai_result_json=?,symbol=?,side=?,entry=?,entry_min=?,entry_max=?,stop_loss=?,take_profit=?,requested_lot=?,
       risk_percentage=?,confidence=?,leg_count=?,analyzed_at=?,updated_at=?,version=version+1 WHERE id=?`).run(
       json(analysis), detected?.symbol ?? null, detected?.side ?? null, detected?.entry ?? null,
@@ -136,10 +214,11 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
 
   hasSemanticDuplicate(signal: TradeSignal, since: string): boolean {
     if (!signal.symbol || !signal.side || !signal.entryMin || !signal.entryMax || !signal.stopLoss || !signal.takeProfit) return false;
-    return Boolean(this.db.prepare(`SELECT 1 FROM signals WHERE id<>? AND source=? AND symbol=? AND side=?
+    return Boolean(this.db.prepare(`SELECT 1 FROM signals WHERE id<>? AND COALESCE(signal_group_id,id)<>? AND source=? AND symbol=? AND side=?
       AND COALESCE(entry_min,entry)=? AND COALESCE(entry_max,entry)=? AND stop_loss=?
       AND take_profit=? AND received_at>=? AND status NOT IN ('IGNORED','REJECTED','ERROR') LIMIT 1`)
-      .get(signal.id, signal.source, signal.symbol, signal.side, signal.entryMin, signal.entryMax, signal.stopLoss, signal.takeProfit, since));
+      .get(signal.id, signal.signalGroupId ?? signal.id, signal.source, signal.symbol, signal.side,
+        signal.entryMin, signal.entryMax, signal.stopLoss, signal.takeProfit, since));
   }
 
   assignNext(clientId: string, mode: "SIMULATION" | "LIVE", maxSimultaneousTrades: number): TradeAssignment | null {
@@ -175,12 +254,19 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
   private mapAssignment(row: Row): TradeAssignment {
     const entryMin = row.entry_min ?? row.entry;
     const entryMax = row.entry_max ?? row.entry;
-    return { signalId: String(row.id), tradeId: String(row.trade_id), assignmentToken: String(row.assignment_token),
+    const assignment = { signalId: String(row.id), tradeId: String(row.trade_id), assignmentToken: String(row.assignment_token),
       mode: row.trading_mode as TradeAssignment["mode"], symbol: String(row.symbol), side: row.side as TradeAssignment["side"],
       entry: String(row.entry), entryMin: String(entryMin), entryMax: String(entryMax),
       stopLoss: String(row.stop_loss), takeProfit: String(row.take_profit), volume: String(row.approved_lot),
       expiresAt: String(row.expires_at),
       groupId: String(row.signal_group_id ?? row.id), legIndex: Number(row.leg_index ?? 0), legCount: Number(row.leg_count ?? 1) };
+    const command = this.findPendingCommand(String(row.trade_id));
+    if (!command) return assignment;
+    const instruction = this.db.prepare("SELECT action FROM management_instructions WHERE id=?")
+      .get(command.instructionId) as { action: ManagementAction };
+    return { ...assignment, managementCommand: { commandId: command.id, type: command.type,
+      requiresProfit: command.type === "CLOSE" && instruction.action === "TAKE_PARTIALS_AND_BREAKEVEN",
+      idempotencyKey: `mgmt-command-result:${command.id}` } };
   }
 
   acknowledge(signalId: string, clientId: string, assignmentToken: string): Trade {
@@ -266,7 +352,14 @@ export class SqliteRepositories implements SignalRepository, TradeRepository, Co
   }
 
   countDailyTrades(dayStart: string, mode: TradingMode): number {
-    return Number((this.db.prepare("SELECT COUNT(*) count FROM trades WHERE assigned_at>=? AND trading_mode=?")
+    // Count only orders that reached the broker/simulator. Rejected assignments and
+    // expired pending entries never became positions, so they must not consume the
+    // daily execution limit. UNKNOWN remains conservative because the broker may
+    // have filled the order even though MT5 could not resolve its position ticket.
+    return Number((this.db.prepare(`SELECT COUNT(DISTINCT t.id) count
+      FROM trades t JOIN executions e ON e.trade_id=t.id
+      WHERE e.executed_at>=? AND t.trading_mode=?
+        AND e.result IN ('FILLED','SIMULATED_EXECUTION','UNKNOWN')`)
       .get(dayStart, mode) as { count: number }).count);
   }
 

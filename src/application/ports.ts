@@ -1,5 +1,5 @@
-import type { TelegramMessage, SignalAnalysis, TradeSignal, SignalStatus, TradingMode } from "../models/signal.js";
-import type { Mt5Context, Trade, TradeAssignment } from "../models/trade.js";
+import type { TelegramMessage, SignalAnalysis, TradeSignal, SignalStatus, TradingMode, ManagementAction, ManagementInstruction } from "../models/signal.js";
+import type { Mt5Context, Trade, TradeAssignment, ManagementCommand } from "../models/trade.js";
 
 export interface TelegramAdapter {
   start(onMessage: (message: TelegramMessage) => Promise<void>): Promise<void>;
@@ -34,6 +34,18 @@ export interface TradeRepository {
   realizedDailyLoss(dayStart: string, mode: TradingMode): string;
   countActiveTrades(): number;
   countActiveTradesForClient(clientId: string): number;
+}
+
+export interface ManagementRepository {
+  createManagementFromTelegram(message: TelegramMessage, action: ManagementAction, symbolHint: string | null, explicitStopLoss: string | null): ManagementInstruction | null;
+  findOpenGroupsForChat(chatId: string): string[];
+  countOpenTradesForGroup(groupId: string): number;
+  resolve(instructionId: string, groupId: string): ManagementInstruction;
+  markAmbiguous(instructionId: string, candidateGroupIds: string[]): ManagementInstruction;
+  markRejected(instructionId: string, code: string, reason: string): ManagementInstruction;
+  createCommandsForGroup(instructionId: string, groupId: string, action: ManagementAction): ManagementCommand[];
+  findPendingCommand(tradeId: string): ManagementCommand | null;
+  recordCommandResult(commandId: string, clientId: string, status: "APPLIED" | "REJECTED" | "UNKNOWN", details?: { code?: string; description?: string }): ManagementCommand;
 }
 
 export interface ContextRepository {

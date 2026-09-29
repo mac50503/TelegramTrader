@@ -10,7 +10,7 @@ import { AppError, NotFoundError } from "../shared/errors.js";
 import { secureEqual } from "../shared/security.js";
 import { logEvent } from "../logging/logger.js";
 import { SETTINGS_PAGE_HTML } from "./settings-page.js";
-import { assignedSchema, clientQuerySchema, closeSchema, contextSchema, executionSchema, settingsUpdateSchema, signalListQuerySchema, slUpdateSchema } from "./schemas.js";
+import { assignedSchema, clientQuerySchema, closeSchema, contextSchema, executionSchema, managementCommandResultSchema, settingsUpdateSchema, signalListQuerySchema, slUpdateSchema } from "./schemas.js";
 
 function header(request: FastifyRequest, name: string): string {
   const value = request.headers[name.toLowerCase()];
@@ -32,7 +32,7 @@ async function idempotent(
 
 export async function buildServer(
   config: AppConfig, repositories: SqliteRepositories, pipeline: SignalPipeline, logger: Logger,
-  telegram?: MtcuteTelegramAdapter, envPath = ".env"
+  telegram?: MtcuteTelegramAdapter, envPath = ".env", requestRestart?: () => void
 ) {
   const app = Fastify({ loggerInstance: logger });
   await app.register(rateLimit, { max: config.api.rateLimitMax, timeWindow: config.api.rateLimitWindowMs });
@@ -61,7 +61,9 @@ export async function buildServer(
   app.post("/api/settings", async (request) => {
     const updates = settingsUpdateSchema.parse(request.body);
     try {
-      return { saved: writeEnvUpdates(envPath, updates) };
+      const saved = writeEnvUpdates(envPath, updates);
+      requestRestart?.();
+      return { saved, restarting: Boolean(requestRestart) };
     } catch (error) {
       throw new AppError("INVALID_SETTINGS", error instanceof Error ? error.message : "Invalid settings", 400);
     }
@@ -148,6 +150,15 @@ export async function buildServer(
       logEvent(logger, "SL_UPDATED", { signalId: request.params.signalId, tradeId: trade.id, source: "MT5", status: trade.status });
       repositories.recordEvent("SL_UPDATED", { signalId: request.params.signalId, tradeId: trade.id, source: "MT5", status: trade.status, payload: { newStopLoss: body.newStopLoss, reason: body.reason } });
       return { trade };
+    }));
+
+  app.post<{ Params: { tradeId: string; commandId: string } }>("/api/trades/:tradeId/management-command/:commandId/result", async (request, reply) =>
+    idempotent(request, reply, repositories, `mgmt-command-result:${request.params.commandId}`, () => {
+      const body = managementCommandResultSchema.parse(request.body);
+      const details = { ...(body.resultCode !== undefined ? { code: body.resultCode } : {}), ...(body.resultDescription !== undefined ? { description: body.resultDescription } : {}) };
+      const command = repositories.recordCommandResult(request.params.commandId, body.clientId, body.status, details);
+      repositories.recordEvent(`MANAGEMENT_COMMAND_${body.status}`, { tradeId: request.params.tradeId, source: "MT5", status: body.status, payload: { commandId: command.id } });
+      return { command };
     }));
 
   app.get<{ Params: { signalId: string } }>("/api/trades/:signalId", async (request) => {

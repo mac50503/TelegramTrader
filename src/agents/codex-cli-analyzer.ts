@@ -39,6 +39,18 @@ export function parseCodexOutput(raw: string): SignalAnalysis {
       if (output.isSignal === false) return { isSignal: false };
       candidate = Object.fromEntries(Object.entries(output).filter(([, value]) => value !== null));
     }
+    // The output-schema may include the new intent envelope while older Codex
+    // sessions still emit the legacy signal fields. Normalize that shape
+    // before strict validation so valid signals are not discarded solely due
+    // to nullable envelope fields.
+    if (candidate && typeof candidate === "object") {
+      const output = candidate as Record<string, unknown>;
+      if (typeof output.symbol === "string" && typeof output.side === "string" && output.stopLoss !== undefined && output.takeProfits !== undefined) {
+        const normalized: Record<string, unknown> = { ...output, isSignal: true };
+        delete normalized.intent; delete normalized.action; delete normalized.symbolHint; delete normalized.explicitStopLoss;
+        candidate = normalized;
+      }
+    }
     return signalAnalysisSchema.parse(candidate);
   } catch (error) {
     throw new AppError("AI_INVALID_JSON", "codex result did not match the expected signal schema", 422, error);

@@ -30,6 +30,10 @@ export const closeSchema = z.object({
 export const slUpdateSchema = z.object({
   clientId: z.string().min(1), assignmentToken: z.string().min(20), newStopLoss: decimal, reason: z.string().min(1).max(200)
 }).strict();
+export const managementCommandResultSchema = z.object({
+  clientId: z.string().min(1), assignmentToken: z.string().min(20), status: z.enum(["APPLIED", "REJECTED", "UNKNOWN"]),
+  resultCode: z.string().max(100).optional(), resultDescription: z.string().max(1000).optional()
+}).strict();
 
 const symbolSpecSchema = z.object({
   canonicalSymbol: z.string().min(3).max(30).transform((value) => value.toUpperCase()), brokerSymbol: z.string().min(1).max(50),

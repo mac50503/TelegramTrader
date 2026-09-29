@@ -67,4 +67,52 @@ describe("repositorio y cola", () => {
     const position = db.prepare("SELECT stop_loss FROM positions WHERE trade_id=?").get(updated.id) as { stop_loss: string };
     expect(position.stop_loss).toBe("100");
   });
+
+  it("take partials cierra la orden completa cuando solo hay una posicion", () => {
+    const signalId = queueSignal("102");
+    const assignment = repo.assignNext("ea-1", "SIMULATION", 1)!;
+    repo.acknowledge(signalId, "ea-1", assignment.assignmentToken);
+    repo.recordExecution({ signalId, clientId: "ea-1", assignmentToken: assignment.assignmentToken,
+      executionId: "EXE-MGMT", requestId: "req-mgmt", result: "SIMULATED_EXECUTION",
+      requestedPrice: "100", requestedVolume: "0.1", executedAt: new Date().toISOString() });
+    const instruction = repo.createManagementFromTelegram({ chatId: "1", messageId: "take-partials",
+      timestamp: new Date().toISOString(), text: "Trade active. Take partials. Set BE.",
+      chatName: "test", source: "TELEGRAM" }, "TAKE_PARTIALS_AND_BREAKEVEN", null, null)!;
+    const groups = repo.findOpenGroupsForChat("1");
+    expect(groups).toEqual([signalId]);
+    expect(repo.countOpenTradesForGroup(groups[0]!)).toBe(1);
+    const commands = repo.createCommandsForGroup(instruction.id, groups[0]!, instruction.action);
+    expect(commands).toMatchObject([{ tradeId: assignment.tradeId, type: "CLOSE", status: "PENDING" }]);
+    expect(repo.currentAssignments("ea-1")[0]?.managementCommand).toMatchObject({
+      commandId: commands[0]?.id, type: "CLOSE", requiresProfit: true
+    });
+  });
+
+  it("el limite diario cuenta ejecuciones reales y no asignaciones rechazadas", () => {
+    const dayStart = new Date(Date.now() - 60_000).toISOString();
+
+    queueSignal("102");
+    const rejected = repo.assignNext("ea-1", "SIMULATION", 1)!;
+    repo.acknowledge(rejected.signalId, "ea-1", rejected.assignmentToken);
+    repo.recordExecution({ signalId: rejected.signalId, clientId: "ea-1", assignmentToken: rejected.assignmentToken,
+      executionId: "EXE-REJECTED", requestId: "req-rejected", result: "REJECTED", requestedPrice: "100",
+      requestedVolume: "0.1", executedAt: new Date().toISOString() });
+    expect(repo.countDailyTrades(dayStart, "SIMULATION")).toBe(0);
+
+    queueSignal("103");
+    const filled = repo.assignNext("ea-1", "SIMULATION", 1)!;
+    repo.acknowledge(filled.signalId, "ea-1", filled.assignmentToken);
+    repo.recordExecution({ signalId: filled.signalId, clientId: "ea-1", assignmentToken: filled.assignmentToken,
+      executionId: "EXE-FILLED", requestId: "req-filled", result: "SIMULATED_EXECUTION", requestedPrice: "100",
+      requestedVolume: "0.1", executedAt: new Date().toISOString() });
+    expect(repo.countDailyTrades(dayStart, "SIMULATION")).toBe(1);
+
+    queueSignal("104");
+    const unknown = repo.assignNext("ea-1", "SIMULATION", 2)!;
+    repo.acknowledge(unknown.signalId, "ea-1", unknown.assignmentToken);
+    repo.recordExecution({ signalId: unknown.signalId, clientId: "ea-1", assignmentToken: unknown.assignmentToken,
+      executionId: "EXE-UNKNOWN", requestId: "req-unknown", result: "UNKNOWN", requestedPrice: "100",
+      requestedVolume: "0.1", executedAt: new Date().toISOString() });
+    expect(repo.countDailyTrades(dayStart, "SIMULATION")).toBe(2);
+  });
 });

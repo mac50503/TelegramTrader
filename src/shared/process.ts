@@ -19,7 +19,7 @@ export function runProcess(command: string, args: readonly string[], input: stri
     const child = spawn(command, [...args], {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH ?? "", ...options.extraEnv }
+      env: { PATH: process.env.PATH ?? process.env.Path ?? "", ...options.extraEnv }
     });
     let stdout = "";
     let stderr = "";

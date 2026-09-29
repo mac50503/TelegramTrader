@@ -26,17 +26,21 @@ describe("migración de esquema para bases de datos existentes", () => {
         version INTEGER NOT NULL DEFAULT 1,
         UNIQUE(source, telegram_chat_id, telegram_message_id)
       );
+      CREATE TABLE legacy_child (id INTEGER PRIMARY KEY, signal_id TEXT NOT NULL REFERENCES signals(id));
     `);
     legacy.prepare(`INSERT INTO signals(
       id,telegram_chat_id,telegram_message_id,source,chat_name,original_message,
       received_at,expires_at,status,created_at,updated_at
     ) VALUES('SIG-OLD-1','1','1','TELEGRAM','test','hi','2026-01-01T00:00:00.000Z','2026-01-01T00:10:00.000Z','QUEUED','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`).run();
+    legacy.prepare("INSERT INTO legacy_child(id,signal_id) VALUES(1,'SIG-OLD-1')").run();
     legacy.close();
 
     const db = openDatabase(file);
     const row = db.prepare("SELECT signal_group_id,leg_index,leg_count FROM signals WHERE id='SIG-OLD-1'").get() as
       { signal_group_id: string; leg_index: number; leg_count: number };
     expect(row).toEqual({ signal_group_id: "SIG-OLD-1", leg_index: 0, leg_count: 1 });
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.prepare("SELECT signal_id FROM legacy_child WHERE id=1").get()).toEqual({ signal_id: "SIG-OLD-1" });
 
     // Ahora ya puede insertar una pierna hermana (leg_index=1) para el mismo mensaje de Telegram,
     // algo que el UNIQUE viejo habría rechazado.

@@ -1,5 +1,6 @@
 import { Decimal } from "decimal.js";
 import { z } from "zod";
+import { managementActions } from "../models/signal.js";
 
 const decimal = z.union([z.string(), z.number()]).transform((value) => String(value));
 
@@ -30,7 +31,15 @@ const detectedSignalSchema = z.object({
     return { ...value, entryMin, entryMax, entry: value.entry ?? (value.side === "BUY" ? entryMin : entryMax) };
   });
 
-export const signalAnalysisSchema = z.discriminatedUnion("isSignal", [
+const legacySignalAnalysisSchema = z.discriminatedUnion("isSignal", [
   z.object({ isSignal: z.literal(false) }).strict(),
   detectedSignalSchema
 ]);
+
+export const managementAnalysisSchema = z.union([
+  z.object({ intent: z.literal("NONE") }).strict(),
+  z.object({ intent: z.literal("MANAGEMENT"), action: z.enum(managementActions), symbolHint: z.string().nullable().optional().default(null), explicitStopLoss: decimal.nullable().optional().default(null), confidence: z.number().min(0).max(1) }).passthrough(),
+  z.object({ intent: z.literal("NEW_SIGNAL"), symbol: z.string().min(1).max(30), side: z.enum(["BUY", "SELL"]), entry: decimal, entryMin: decimal, entryMax: decimal, stopLoss: decimal, takeProfits: z.array(decimal).min(1), lot: decimal.optional(), riskPercentage: decimal.optional(), confidence: z.number().min(0).max(1) }).passthrough()
+]);
+
+export const signalAnalysisSchema = z.union([legacySignalAnalysisSchema, managementAnalysisSchema]);

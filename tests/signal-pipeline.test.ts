@@ -58,6 +58,21 @@ describe("SignalPipeline: expansión multi-TP", () => {
     expect(repo.list(100, 0)).toHaveLength(1);
   });
 
+  it("aplica TP1 a todas las piernas solo para FX KINGS - PULSE", async () => {
+    const pipeline = buildPipeline(["101", "102", "103"]);
+    const original = await pipeline.ingest({
+      chatId: "-1003915755639", messageId: "pulse-1", timestamp: new Date().toISOString(),
+      text: "BUY XAUUSD TP1 101 TP2 102 TP3 103", chatName: "FX KINGS - PULSE", source: "TELEGRAM"
+    });
+
+    const legs = repo.list(100, 0)
+      .filter((signal) => signal.signalGroupId === original?.id)
+      .sort((a, b) => a.legIndex - b.legIndex);
+    expect(legs).toHaveLength(3);
+    expect(legs.map((signal) => signal.takeProfit)).toEqual(["101", "101", "101"]);
+    expect(legs.map((signal) => signal.status)).toEqual(["QUEUED", "QUEUED", "QUEUED"]);
+  });
+
   describe("mensaje real de Telegram: GOLD SELL con TP1-TP3 y TP4=Hold", () => {
     // Extracción capturada de una corrida real contra `claude -p` (modelo haiku) usando el
     // system prompt/json-schema actuales de prompt-builder.ts para este mensaje exacto:

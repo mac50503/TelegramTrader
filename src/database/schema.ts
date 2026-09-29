@@ -159,6 +159,26 @@ CREATE TABLE IF NOT EXISTS mt5_deal_history (
 CREATE INDEX IF NOT EXISTS idx_mt5_deal_history_signal ON mt5_deal_history(signal_id);
 CREATE INDEX IF NOT EXISTS idx_mt5_deal_history_position ON mt5_deal_history(position_ticket);
 
+CREATE TABLE IF NOT EXISTS management_instructions (
+  id TEXT PRIMARY KEY, telegram_chat_id TEXT NOT NULL, telegram_message_id TEXT NOT NULL,
+  source TEXT NOT NULL, chat_name TEXT NOT NULL, original_message TEXT NOT NULL,
+  action TEXT NOT NULL, symbol_hint TEXT, explicit_stop_loss TEXT, resolved_signal_group_id TEXT,
+  status TEXT NOT NULL, rejection_code TEXT, rejection_reason TEXT, received_at TEXT NOT NULL,
+  resolved_at TEXT, applied_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mgmt_dedup ON management_instructions(source, telegram_chat_id, telegram_message_id);
+CREATE INDEX IF NOT EXISTS idx_mgmt_status ON management_instructions(status, received_at);
+
+CREATE TABLE IF NOT EXISTS management_commands (
+  id TEXT PRIMARY KEY, instruction_id TEXT NOT NULL REFERENCES management_instructions(id),
+  trade_id TEXT NOT NULL REFERENCES trades(id), type TEXT NOT NULL CHECK(type IN ('CLOSE','MOVE_SL_TO_BREAKEVEN')),
+  status TEXT NOT NULL, result_code TEXT, result_description TEXT, created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_mgmt_commands_trade ON management_commands(trade_id, status);
+CREATE INDEX IF NOT EXISTS idx_mgmt_commands_instruction ON management_commands(instruction_id);
+
 CREATE TABLE IF NOT EXISTS idempotency_records (
   scope TEXT NOT NULL,
   key TEXT NOT NULL,

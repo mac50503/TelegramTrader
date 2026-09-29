@@ -45,4 +45,29 @@ describe("PrefilteredSignalAnalyzer", () => {
     const result = await prefilter.analyze({ ...message, text: "BUY XAUUSD ENTRY=3345 SL=3335 TP=3370" }, "SIG-2");
     expect(result).toEqual(expected);
   });
+
+  it("reconoce instrucciones explicitas de parciales y breakeven sin depender del CLI", async () => {
+    const inner: SignalAnalyzer = { analyze: () => { throw new Error("no deberia llamarse"); } };
+    const prefilter = new PrefilteredSignalAnalyzer(inner, logger);
+    const result = await prefilter.analyze({ ...message,
+      text: "Trade active and running +50PIPS V\nTake partials. Manage Trade Risk. If hold set BE. Hold risk with Breakeven(BE)" }, "SIG-3");
+    expect(result).toEqual({ intent: "MANAGEMENT", action: "TAKE_PARTIALS_AND_BREAKEVEN",
+      symbolHint: null, explicitStopLoss: null, confidence: 1 });
+  });
+
+  it("cierra todas las posiciones del grupo ALGORITMO XAU ante la frase portuguesa", async () => {
+    const inner: SignalAnalyzer = { analyze: () => { throw new Error("no deberia llamar al analizador"); } };
+    const prefilter = new PrefilteredSignalAnalyzer(inner, logger);
+    const result = await prefilter.analyze({ ...message, chatId: "-1003802258175",
+      text: "Vamos ENCERRAR a operação agora e ajustar para o breakeven se quiser continuar" }, "SIG-4");
+    expect(result).toEqual({ intent: "MANAGEMENT", action: "CLOSE_ALL",
+      symbolHint: null, explicitStopLoss: null, confidence: 1 });
+  });
+
+  it("no aplica el cierre portugues a otros grupos", async () => {
+    const inner: SignalAnalyzer = { analyze: async () => ({ isSignal: false }) };
+    const prefilter = new PrefilteredSignalAnalyzer(inner, logger);
+    const result = await prefilter.analyze({ ...message, text: "Vamos encerrar a operação agora" }, "SIG-5");
+    expect(result).toEqual({ isSignal: false });
+  });
 });
