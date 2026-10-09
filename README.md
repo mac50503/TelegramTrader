@@ -426,3 +426,55 @@ La configuración operativa actual utiliza:
 - `DEFAULT_FIXED_LOT=0.1` para nuevas señales sin lote solicitado.
 
 Para que MT5 reciba asignaciones, agrega `http://127.0.0.1:3000` a la lista de WebRequest permitidas en **Herramientas → Opciones → Asesores Expertos**. El EA publica el contexto de cuenta y símbolo cada 60 segundos incluso con operaciones activas; si el contexto está ausente o vencido, una señal permanece en `VALIDATED` y no pasa a `QUEUED`.
+
+## Verificacion de instalacion y sincronizacion (2026-10-09)
+
+El instalador `TelegramTrader-installer-20260929/install.ps1` utiliza
+`https://github.com/mac50503/TelegramTrader/archive/refs/heads/main.zip`.
+El repositorio correspondiente es https://github.com/mac50503/TelegramTrader,
+rama `main`; la carpeta de instalacion predeterminada es `$HOME/TelegramTrader`.
+Si esa carpeta ya existe, el instalador reutiliza su codigo sin descargarlo otra vez.
+
+Se clono el remoto en una carpeta temporal y se ejecuto `git pull --ff-only origin main`.
+La comparacion con la instalacion, sobre la base `d3caa99`, abarco 69 archivos
+versionados: no hubo archivos ausentes ni cambios funcionales pendientes.
+Los siguientes 19 archivos solo diferian en saltos de linea LF/CRLF; su contenido
+coincidio al normalizar esos saltos. No requieren trasladar cambios de codigo:
+
+- `README.md`
+- `mt5/Experts/TelegramTraderEA.mq5`
+- `src/agents/codex-cli-analyzer.ts`
+- `src/agents/prompt-builder.ts`
+- `src/agents/signal-schema.ts`
+- `src/api/schemas.ts`
+- `src/api/server.ts`
+- `src/api/settings-page.ts`
+- `src/application/ports.ts`
+- `src/database/database.ts`
+- `src/database/schema.ts`
+- `src/main.ts`
+- `src/models/signal.ts`
+- `src/models/trade.ts`
+- `src/services/signal-pipeline.ts`
+- `src/shared/process.ts`
+- `tests/api-integration.test.ts`
+- `tests/database-migration.test.ts`
+- `tests/signal-pipeline.test.ts`
+
+La revision excluye configuracion privada, sesiones, bases de datos, registros,
+dependencias y compilados ignorados por Git. No deben incorporarse al commit.
+
+### Comprobacion del analizador de IA al arrancar
+
+Una respuesta `ok` de `/api/health` confirma la API y la base de datos, pero no
+certifica que el analizador este activo. Cuando se utiliza deteccion automatica,
+comprobar el evento `AI_PROVIDER_DETECTED` con estado `READY` en los registros.
+`AI_PROVIDER_NOT_FOUND` significa que ningun proveedor pudo ejecutarse; el
+servidor utiliza entonces `DisabledSignalAnalyzer`, que devuelve `isSignal: false`.
+`AI_DISABLED` indica que la IA esta desactivada por configuracion.
+
+Verificar que el proceso del servidor pueda ejecutar el proveedor con su PATH
+y permisos efectivos. Despues de corregirlos, reiniciar el servidor: la deteccion
+se realiza una sola vez al arrancar. Probar el analizador de forma aislada, sin
+insertar ni reenviar senales a la cola LIVE, y comprobar tambien la conexion de
+Telegram y la recepcion reciente de contexto del EA.
